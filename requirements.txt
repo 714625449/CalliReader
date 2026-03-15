@@ -30,7 +30,7 @@ kiwisolver
 Levenshtein==0.26.1
 MarkupSafe 
 matplotlib==3.9.2
-mkl-service==2.4.0
+mkl-service==2.4.2
 mkl_fft 
 mkl_random 
 mpmath 
@@ -39,7 +39,7 @@ multiprocess==0.70.15
 networkx 
 numexpr 
 numpy 
-OpenCC==1.1.6
+opencc-python-reimplemented
 opencv-python
 opencv-python-headless
 packaging 
