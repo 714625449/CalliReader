@@ -29,7 +29,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False 
 
-cc = opencc.OpenCC('t2s.json')
+cc = opencc.OpenCC('t2s')
 set_seed(SEED)
 converter_t2s = opencc.OpenCC('t2s')
 

@@ -30,7 +30,6 @@ kiwisolver
 Levenshtein==0.26.1
 MarkupSafe 
 matplotlib==3.9.2
-mkl-service==2.4.2
 mkl_fft 
 mkl_random 
 mpmath 
