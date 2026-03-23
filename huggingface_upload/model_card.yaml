@@ -1,0 +1,54 @@
+# Model card for CaoshuReader
+
+## Model Details
+
+- **Model Name**: CaoshuReader
+- **Model Version**: 1.0
+- **Model Description**: Cursive Chinese calligraphy recognition model based on InternVL2-8B
+- **Language**: Chinese
+- **License**: Apache 2.0
+- **Repository**: https://github.com/LoYuXr/CalliReader
+- **Hugging Face**: https://huggingface.co/qz2fxt/CaoshuReader
+
+## Intended Use
+
+- Recognition of cursive Chinese calligraphy
+- Full-page and region-wise OCR for calligraphic artworks
+- Cultural heritage digitization
+- Calligraphy education and research
+
+## Limitations
+
+- Optimized specifically for cursive script; may not perform as well on other scripts
+- Requires GPU with at least 16GB memory for inference
+- Training data primarily from specific sources; may have bias
+
+## Training Data
+
+- **Dataset**: CursiveChineseCalligraphyDataset
+- **Size**: 655,892 training images
+- **Characters**: 5,301 unique characters
+- **Source**: https://github.com/nccuviplab/CursiveChineseCalligraphyDataset
+
+## Evaluation
+
+- **Metric**: Character-level accuracy
+- **Test Set**: 9,548 images
+- **Accuracy**: 90% on cursive script
+
+## Environmental Impact
+
+- **Hardware**: RTX 3090 20GB
+- **Training Time**: 2-3 days
+- **CO2 Emissions**: ~10 kg (estimated)
+
+## Citation
+
+```bibtex
+@software{caoshureader2026,
+  author = {CaoshuReader Team},
+  title = {CaoshuReader: Cursive Chinese Calligraphy Recognition},
+  year = {2026},
+  url = {https://huggingface.co/qz2fxt/CaoshuReader}
+}
+```
