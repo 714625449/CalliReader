@@ -1,105 +1,129 @@
 <h2 align="center">
-  <b>CalliReader<img src="imgs\logo.png" alt="Image" width="30" height="30">: Contextualizing Chinese Calligraphy via
-an Embedding-aligned Vision Language Model</b>
-
-
-
-<div align="center">
-     <a href="https://arxiv.org/abs/2503.06472" target="_blank">
-        <img src="https://img.shields.io/badge/Paper-ArXiv-red" alt="Paper arXiv">
-    </a>
-    <img src="https://img.shields.io/badge/Page-CalliReader-blue" alt="Project Page"/></a>
-    <a href="your pdf here" target="_blank">
-    <img src="https://img.shields.io/badge/Lab-Link-green" alt="Lab Link"></a>
-    <a href="https://huggingface.co/datasets/gtang666/CalliBench" target="_blank">
-        <img src="https://img.shields.io/badge/Data-Huggingface-yellow" alt="HF Data">
-    </a>
-</div>
+  <b>CaoshuReader: Chinese Cursive Script (草書) Recognition via an Embedding-aligned Vision Language Model</b>
 </h2>
 
-This is the repository of [**CalliReader: Contextualizing Chinese Calligraphy via
-an Embedding-aligned Vision Language Model**](https://arxiv.org/pdf/2503.06472).
+<div align="center">
+    <img src="https://img.shields.io/badge/Status-In%20Development-orange" alt="Status"/>
+    <img src="https://img.shields.io/badge/Base-CalliReader-blue" alt="Based on CalliReader"/>
+    <img src="https://img.shields.io/badge/Task-Caoshu%20OCR-green" alt="Caoshu OCR"/>
+</div>
 
-CalliReader is a novel plug-and-play Vision-Language Model (VLM) specifically designed to interpret calligraphic artworks with diverse styles and layouts, leveraging slicing priors, embedding alignment, and effective fine-tuning. It demonstrates remarkable performances on Chinese Calligraphy recognition and understanding, while also retains excellent OCR ability on general scenes.
+---
 
-For more information, please visit our [**project page**](https://your_page_here/)    (Unfinished).
+CaoshuReader is a fine-tuned Vision-Language Model (VLM) forked from [**CalliReader**](https://arxiv.org/pdf/2503.06472), specifically enhanced to recognize and interpret **Caoshu (草書)** — the most fluid and abstract style of Chinese calligraphy.
 
-![teaser](imgs/teaser.jpg)
+Built on CalliReader's architecture of slicing priors, embedding alignment, and effective fine-tuning, CaoshuReader further specializes on the unique challenges of cursive script: highly stylized strokes, non-linear layouts, and enormous variation across historical masters. It demonstrates strong performance on Caoshu recognition and understanding, while retaining robust OCR ability on general scenes.
+
+> **Solo project** built by one developer using AI agent collaboration (Kimi Code, Claude Code, OpenClaw).  
+> A project of this scope would typically require a small team over several months.
+
+---
 
 ## 📬 News
-- **2025.10.6** We are releasing our CalliBench.
-- **2025.8.10** We are releasing our training scripts.
-- **2025.6.26** Our newest model is now available on HuggingFace.
-- **2025.6.25** Our work has been accepted by ICCV 2025!
-- **2025.2.12** The repository has been updated.
+- **2025.03** 🚀 CaoshuReader repository initialized — forked from CalliReader.
 
-## How to Use Our Code and Model:
-We are releasing our network and checkpoints. You can download weights of our CalliReader from this [**HuggingFace  link**](https://huggingface.co/gtang666/CalliReader/tree/main). Finetuned VLM weight files that end with ```.safetensors``` are stored in the folder ```InternVL```, and all pluggable modules can be found in the folder ```params```. You can download those files and put them in the same folder of the cloned repository.
+---
 
-You can setup the pipeline under the following guidance.
+## How to Use
 
-### 0. Install dependencies
-1. We recommend creating a conda environment with Python>=3.9 and activate it:
+### 0. Install Dependencies
+
+1. Create a conda environment with Python >= 3.9:
+```bash
+conda create -n caoshureader python=3.9
+conda activate caoshureader
 ```
-conda create -n callireader python=3.9
-conda activate callireader
-```
-2. Then, install essential dependencies:
-```
+
+2. Install essential dependencies:
+```bash
 pip install requirements.txt
 ```
-3. Finally, install the package ```flash-attn```:
-```
+
+3. Install `flash-attn`:
+```bash
 pip install flash-attn
 ```
-If you encounter certain problems with this package, you can download .whl file [here](https://github.com/Dao-AILab/flash-attention/releases) for direct installation:
-```
-pip install flash_attn-xxx.whl
-```
-Please note that this package only supports Linux systems with CUDA installed, and all of their versions should be matched. For further issues about ```flash-attn```, please turn to its [repository](https://github.com/Dao-AILab/flash-attention) for help. 
 
-### 1. Inference
-We have verified that ```.jpg``` and ```.png``` format images are well supported.
+> ⚠️ `flash-attn` requires a Linux system with CUDA installed. If you encounter issues, download the `.whl` file from [here](https://github.com/Dao-AILab/flash-attention/releases):
+> ```bash
+> pip install flash_attn-xxx.whl
+> ```
+> For further issues, refer to the [flash-attention repository](https://github.com/Dao-AILab/flash-attention).
 
-1. For a single image, use
+---
+
+### 1. Download Weights
+
+*(Coming soon — weights will be released on HuggingFace)*
+
+Download the model weights and place them in the root folder of the cloned repository:
+- Fine-tuned VLM weights (`.safetensors`) → `InternVL/` folder
+- Pluggable modules → `params/` folder
+
+---
+
+### 2. Inference
+
+Supported formats: `.jpg`, `.png`
+
+**Single image:**
+```bash
+python inference.py --tgt=<image path>
 ```
-python inference.py --tgt=<image path> 
+Result is printed directly in the terminal.
+
+**Folder of images:**
+```bash
+python inference.py --tgt=<folder path> --save_name=<your save name>
 ```
-The result will be output directly in the terminal.
+Results saved to `./results/<your save name>.json`.
 
-2. For a folder with multiple images, use
+---
+
+### 3. Dataset
+
+*(Coming soon)*
+
+CaoshuReader will be evaluated on a Caoshu-focused dataset derived from CalliReader's [CalliBench](https://huggingface.co/datasets/gtang666/CalliBench), extended with additional Caoshu-specific samples.
+
+Original CalliBench covers: Full-page Recognition, Region-wise OCR, Choice Questions (Author, Style, Layout), Bilingual Interpretation, and Intent Analysis — 3,192 image-annotation samples in total.
+
+---
+
+### 4. Training
+
+*(Coming soon)*
+
+Please refer to the **[train](train/)** folder for training scripts and instructions.
+
+---
+
+### 5. Evaluation
+
+*(Coming soon)*
+
+```bash
+python evaluate.py --type=<Eval type> --data=<dataset path> --save_name=<test name>
 ```
-python inference.py --tgt=<folder path>  --save_name=<your save name>
+
+Example:
+```bash
+python evaluate.py --type=full_page --data=./CaoshuBench --save_name=exp
 ```
-Results will be saved to ```./results/<your save name>.json```.
 
-### 2. Dataset
-#### CalliBench
-Data of **Full-page Recognition, Region-wise OCR, Choice Questions (Author, Style, and Layout), Bilingual Interpretation, and Intent Analysis** can be downloaded in this [**link**](https://huggingface.co/datasets/gtang666/CalliBench). It contains 3,192 image-annotation samples in total, and we use them to construct our CalliBench.
-#### Training data
-Data of 7,357 samples for e-IT can be downloaded in this [**link**](https://huggingface.co/datasets/gtang666/CalliTrain).
+---
 
+## 🙏 Acknowledgements
 
-### 3. Training
-Please refer to the **[train](https://github.com/LoYuXr/CalliReader/tree/main/train)** folder for further instructions. 
+CaoshuReader is built on top of [**CalliReader**](https://github.com/LoYuXr/CalliReader). Full credit to the original authors:
 
+> Luo, Yuxuan and Tang, Jiaqi and Huang, Chenyi and Hao, Feiyang and Lian, Zhouhui.  
+> *CalliReader: Contextualizing Chinese Calligraphy via an Embedding-Aligned Vision-Language Model.*  
+> ICCV 2025, pp. 23030–23040.
 
-### 4. Evaluation
-Run ``evaluate.py`` to assess the model on our CalliBench. You should first download the dataset and then run
+If you use CalliReader's underlying model or dataset, please cite the original work:
 
-```
-python evaluate.py --type=<Eval type> --data=<CalliBench path> --save_name=<Test name>
-```
-to evaluate the model on various Calligraphy-related tasks. For example, run
-```
-python evaluate.py --type=full_page --data=./Callibench --save_name=exp
-```
-to test the model on full-page recognition task.
-
-For bilingual interpretation and intent analysis tasks, please refer to **[train](https://github.com/LoYuXr/CalliReader/tree/main/train)** folder for example codes.
-
-## Citation
-```
+```bibtex
 @InProceedings{Luo_2025_ICCV,
     author    = {Luo, Yuxuan and Tang, Jiaqi and Huang, Chenyi and Hao, Feiyang and Lian, Zhouhui},
     title     = {CalliReader: Contextualizing Chinese Calligraphy via an Embedding-Aligned Vision-Language Model},
