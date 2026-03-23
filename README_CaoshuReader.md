@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/LoYuXr/CalliReader/tree/CaoshuReader">
+  <a href="https://github.com/714625449/CalliReader/tree/CaoshuReader">
     <img src="https://img.shields.io/badge/GitHub-CaoshuReader-blue" alt="GitHub">
   </a>
   <a href="https://huggingface.co/qz2fxt/CaoshuReader">
@@ -19,14 +19,14 @@
 </p>
 
 <p align="center">
-  <img src="examples/0.jpg" width="300" alt="草书示例">
+  <img src="examples/2.jpg" width="250" alt="草书示例">
 </p>
 
 ---
 
 ## 📋 项目简介
 
-**CaoshuReader** 是 [CalliReader](https://github.com/LoYuXr/CalliReader) 的专门优化分支，针对**草书（Cursive Script）**中文书法进行深度优化。
+**CaoshuReader** 是 [CalliReader](https://github.com/714625449/CalliReader) 的专门优化分支，针对**草书（Cursive Script）**中文书法进行深度优化。
 
 ### 核心优势
 
@@ -63,7 +63,7 @@ GPU: RTX 3090 20GB+ (训练) / 8GB+ (推理)
 
 ```bash
 # 克隆仓库
-git clone https://github.com/LoYuXr/CalliReader.git
+git clone https://github.com/714625449/CalliReader.git
 cd CalliReader
 
 # 切换到草书分支
@@ -296,7 +296,7 @@ InternLM2 (LoRA微调)
 
 ## 🙏 致谢
 
-- **[CalliReader](https://github.com/LoYuXr/CalliReader)** - 原项目基础
+- **[CalliReader](https://github.com/714625449/CalliReader)** - 原项目基础
 - **[CursiveChineseCalligraphyDataset](https://github.com/nccuviplab/CursiveChineseCalligraphyDataset)** - 草书数据集（国立政治大学）
 - **[shufa.supfree.net](https://shufa.supfree.net/)** - 书法字典网
 - **[InternVL](https://github.com/OpenGVLab/InternVL)** - 基础视觉语言模型
@@ -305,7 +305,7 @@ InternLM2 (LoRA微调)
 
 ## 📞 联系我们
 
-- **GitHub Issues**: [提交问题](https://github.com/LoYuXr/CalliReader/issues)
+- **GitHub Issues**: [提交问题](https://github.com/714625449/CalliReader/issues)
 - **Hugging Face**: [qz2fxt/CaoshuReader](https://huggingface.co/qz2fxt/CaoshuReader)
 - **Email**: 请通过 GitHub 联系
 
@@ -316,7 +316,7 @@ InternLM2 (LoRA微调)
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/LoYuXr/CalliReader?style=social" alt="GitHub stars">
+  <img src="https://img.shields.io/github/stars/714625449/CalliReader?style=social" alt="GitHub stars">
 </p>
 
 ---
