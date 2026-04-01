@@ -53,10 +53,73 @@ def get_visual_embed(imgs, vit, mlp1):
 
 
 def alignment_loss(pred, target_embed):
-    tgt = F.normalize(target_embed, dim=-1).unsqueeze(1)
+    """
+    pred: (B, 3, D) - 3个query的输出
+    target_embed: (B, D) - 目标字符embedding
+
+    改进：每个 query 都学习目标，但允许它们从不同角度学习
+    """
+    # 扩展 target 到 3 个副本
+    tgt = target_embed.unsqueeze(1).expand(-1, 3, -1)  # (B, 3, D)
+
+    # 归一化
     pred_norm = F.normalize(pred, dim=-1)
-    cosine_sim = (pred_norm * tgt).sum(dim=-1)
+    tgt_norm = F.normalize(tgt, dim=-1)
+
+    # 每个 query 的 cosine similarity
+    cosine_sim = (pred_norm * tgt_norm).sum(dim=-1)  # (B, 3)
+
+    # 对所有 query 求平均 loss
     return (1 - cosine_sim).mean()
+
+
+@torch.no_grad()
+def validate(resampler, val_loader, vit, mlp1, tok_embeddings, tokenizer, dataset, device):
+    """在验证集上计算平均loss"""
+    resampler.eval()
+    total_loss, count = 0.0, 0
+    for imgs, labels in val_loader:
+        imgs = imgs.to(device).to(torch.bfloat16)
+        vit_feats = get_visual_embed(imgs, vit, mlp1)
+        pred = resampler(vit_feats)
+        chars = [dataset.idx2char[l.item()] for l in labels]
+        token_ids = tokenizer(chars, return_tensors='pt', add_special_tokens=False,
+                              padding=True, truncation=True, max_length=4).input_ids[:, 0].to(device)
+        tgt_embed = tok_embeddings(token_ids)
+        total_loss += alignment_loss(pred, tgt_embed).item()
+        count += 1
+    resampler.train()
+    return total_loss / count if count > 0 else float('inf')
+
+
+def save_best_val_ckpts(save_dir, ckpt_data, val_loss, step, keep_best, best_val_ckpts):
+    """保存top-K最佳验证checkpoint"""
+    best_val_ckpts.append((val_loss, step))
+    best_val_ckpts.sort(key=lambda x: x[0])
+    if len(best_val_ckpts) > keep_best:
+        best_val_ckpts.pop()
+
+    for rank, (loss, s) in enumerate(best_val_ckpts, 1):
+        if s == step:
+            path = os.path.join(save_dir, f'caoshu_best_val_{rank}.pt')
+            ckpt_data['val_loss'] = val_loss
+            torch.save(ckpt_data, path)
+            print(f"  🌟 Saved best_val_{rank}: val_loss={val_loss:.4f}")
+            break
+
+
+def check_disk_space_detailed(path):
+    """详细磁盘空间检查，返回状态和剩余GB"""
+    free_gb, total_gb = get_disk_usage(path)
+    if free_gb > 20:
+        status = 'normal'
+    elif free_gb > 10:
+        status = 'warning'
+    elif free_gb > 5:
+        status = 'critical'
+    else:
+        status = 'emergency'
+    return status, free_gb
 
 
 def get_disk_usage(path):
@@ -122,7 +185,7 @@ def check_disk_space(save_dir, keep_ckpts, ckpt_size_gb=3.2):
 
 
 def get_args():
-    p = argparse.ArgumentParser(description='CaoshuReader Training - 120GB Disk Optimized')
+    p = argparse.ArgumentParser(description='CaoshuReader Training - Auto Val/LR/Disk')
     p.add_argument('--data_root', type=str,
         default='/root/sj-tmp/datasets/CursiveChineseCalligraphyDataset/Cursive_Chinese_Calligraphy_Dataset')
     p.add_argument('--split', type=str, default='Training')
@@ -130,13 +193,20 @@ def get_args():
     p.add_argument('--batch_size', type=int, default=16)
     p.add_argument('--grad_accum', type=int, default=16)
     p.add_argument('--lr', type=float, default=1e-4)
-    p.add_argument('--total_steps', type=int, default=100000)  # 增加到支持继续训练
+    p.add_argument('--total_steps', type=int, default=100000)
     p.add_argument('--log_every', type=int, default=100)
     p.add_argument('--save_every', type=int, default=1000)
-    p.add_argument('--keep_ckpts', type=int, default=20, help='保留最近N个step checkpoint（建议20，约60GB）')
+    p.add_argument('--keep_ckpts', type=int, default=5, help='保留最近N个step checkpoint（默认5，约16GB）')
     p.add_argument('--resume', type=str, default=None)
     p.add_argument('--num_layers', type=int, default=4)
     p.add_argument('--skip_disk_check', action='store_true', help='跳过磁盘空间检查')
+    # 验证与自动LR
+    p.add_argument('--val_every', type=int, default=1000, help='每N步在验证集上评估一次')
+    p.add_argument('--lr_patience', type=int, default=3, help='val loss停滞N次后降低LR')
+    p.add_argument('--lr_factor', type=float, default=0.5, help='LR缩减倍数')
+    p.add_argument('--min_lr', type=float, default=1e-7, help='LR下限')
+    p.add_argument('--keep_best_val', type=int, default=3, help='保留top-K最佳val loss checkpoint')
+    p.add_argument('--early_stop', type=int, default=None, help='val loss连续N次无改善则停止（默认不启用）')
     return p.parse_args()
 
 
@@ -185,15 +255,30 @@ def main():
     dataset = CaoshuDataset(args.data_root, args.split,
                             transform=get_transform(args.split))
     loader = DataLoader(dataset, batch_size=args.batch_size,
-                        shuffle=True, num_workers=4,
-                        pin_memory=True, drop_last=True)
+                        shuffle=True, num_workers=0,
+                        pin_memory=False, drop_last=True)
+
+    # 验证集
+    try:
+        val_dataset = CaoshuDataset(args.data_root, 'Validation', transform=get_transform('Validation'))
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                                num_workers=0, pin_memory=False, drop_last=False)
+        print(f"验证集: {len(val_dataset)} 样本")
+    except Exception as e:
+        print(f"⚠️  无法加载验证集: {e}，跳过验证")
+        val_loader = None
 
     optimizer = AdamW(resampler.parameters(), lr=args.lr, weight_decay=1e-2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps, eta_min=args.min_lr)
 
     start_step = 0
     best_loss = float('inf')
     best_step = 0
+    best_val_loss = float('inf')
+    best_val_ckpts = []   # list of (val_loss, step), sorted ascending
+    val_loss_history = []
+    lr_reduce_count = 0
+    no_improve_count = 0
     
     if args.resume:
         ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
@@ -250,6 +335,54 @@ def main():
 
             step += 1
 
+            # 验证与自动LR调整
+            if val_loader and step % args.val_every == 0:
+                val_loss = validate(resampler, val_loader, vit, mlp1, tok_embeddings, tokenizer, val_dataset, device)
+                val_loss_history.append(val_loss)
+
+                # 磁盘检查
+                disk_status, free_gb = check_disk_space_detailed('/root/sj-tmp/')
+                disk_icon = {'normal': '✅', 'warning': '⚠️', 'critical': '🔴', 'emergency': '🚨'}[disk_status]
+                print(f"  [Val] step={step:6d} val_loss={val_loss:.4f} | disk: {disk_icon} {free_gb:.1f}GB")
+
+                # 保存最佳val checkpoint
+                ckpt_data = {
+                    'step': step,
+                    'model_state_dict': resampler.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'loss': loss_item,
+                    'val_loss': val_loss,
+                }
+                if disk_status != 'emergency':
+                    save_best_val_ckpts(args.save_dir, ckpt_data, val_loss, step, args.keep_best_val, best_val_ckpts)
+
+                # LR plateau检测
+                if len(val_loss_history) >= args.lr_patience:
+                    recent_best = min(val_loss_history[-args.lr_patience:])
+                    if recent_best >= best_val_loss - 1e-4:
+                        current_lr = optimizer.param_groups[0]['lr']
+                        new_lr = max(current_lr * args.lr_factor, args.min_lr)
+                        if new_lr < current_lr:
+                            for pg in optimizer.param_groups:
+                                pg['lr'] = new_lr
+                            scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps - step, eta_min=args.min_lr)
+                            lr_reduce_count += 1
+                            val_loss_history.clear()
+                            print(f"  📉 LR reduced: {current_lr:.2e} → {new_lr:.2e} (#{lr_reduce_count})")
+
+                # 更新最佳val loss
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    no_improve_count = 0
+                else:
+                    no_improve_count += 1
+
+                # Early stopping
+                if args.early_stop and no_improve_count >= args.early_stop:
+                    print(f"  🛑 Early stopping: {no_improve_count} validations without improvement")
+                    break
+
             if step % args.log_every == 0:
                 print(f"step={step:6d} | loss={loss_item:.4f} | "
                       f"lr={scheduler.get_last_lr()[0]:.2e} | best={best_loss:.4f}@{best_step}")
@@ -257,11 +390,12 @@ def main():
             # 每 save_every 步保存常规 checkpoint
             if step % args.save_every == 0:
                 ckpt_path = os.path.join(args.save_dir, f'caoshu_step{step}.pt')
-                
-                # 检查磁盘空间，紧急情况下跳过保存
-                free_gb, _ = get_disk_usage(args.save_dir)
-                if free_gb < 5:  # 只剩5GB时紧急跳过
-                    print(f"  ⚠️  Skip saving step{step}: disk full ({free_gb:.1f}GB left)")
+                disk_status, free_gb = check_disk_space_detailed('/root/sj-tmp/')
+
+                if disk_status == 'emergency':
+                    print(f"  🚨 Skip step{step}: disk emergency ({free_gb:.1f}GB left)")
+                elif disk_status == 'critical':
+                    print(f"  🔴 Skip step{step}: disk critical ({free_gb:.1f}GB left), only saving best_val")
                 else:
                     torch.save({
                         'step': step,
@@ -304,8 +438,13 @@ def main():
         print(f"\n{'='*60}")
         print(f"训练完成！")
         print(f"最终模型: {final_path} (step {step}, loss {loss_item:.4f})")
-        print(f"最佳模型: caoshu_best.pt (step {best_step}, loss {best_loss:.4f})")
-        print(f"保留{args.keep_ckpts}个中间模型，占用约{args.keep_ckpts*3.2:.0f}GB")
+        print(f"最佳Train Loss: caoshu_best.pt (step {best_step}, loss {best_loss:.4f})")
+        if best_val_ckpts:
+            print(f"最佳Val Loss:   caoshu_best_val_1.pt (step {best_val_ckpts[0][1]}, val_loss {best_val_ckpts[0][0]:.4f})")
+        print(f"LR缩减次数: {lr_reduce_count}")
+        print(f"保留{args.keep_ckpts}个中间step模型 + {args.keep_best_val}个最佳val模型")
+        _, free_gb = check_disk_space_detailed('/root/sj-tmp/')
+        print(f"当前磁盘剩余: {free_gb:.1f}GB (/root/sj-tmp/)")
         print(f"{'='*60}")
     else:
         print(f"\n{'='*60}")

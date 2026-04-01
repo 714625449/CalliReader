@@ -100,96 +100,114 @@ class CalliReaderPipeline:
         self.num_classes = len(self.idx2char)
         print(f"[Pipeline] 字符类别数: {self.num_classes}")
 
-        # 预计算字符 embeddings
-        from models.model import load_normed_tok_embeddings
-        self.tok_embeddings = load_normed_tok_embeddings(location='cpu')
-        self.tok_embeddings = self.tok_embeddings.to(self.device).to(torch.bfloat16)
-        self.tok_embeddings.eval()
-        
-        self.all_char_embeds = self._compute_all_char_embeddings()
+        # 使用模型自带的 normed_emb（和 vq_cos_sim 一致）
+        self.normed_emb = self.model.normed_emb
+        self.normed_emb.eval()
+
+        self.all_char_embeds, self.all_char_token_ids = self._compute_all_char_embeddings()
         self.all_char_embeds_norm = F.normalize(self.all_char_embeds, dim=-1)
 
         print("[Pipeline] 初始化完成！\n")
 
     def _compute_all_char_embeddings(self, batch_size=1000):
-        """分批计算所有字符的embedding"""
-        self.tok_embeddings.eval()
+        """分批计算所有字符的embedding，返回 embedding 和对应 token id"""
+        self.normed_emb.eval()
         all_embeds = []
+        all_token_ids = []
         num_batches = (self.num_classes + batch_size - 1) // batch_size
 
         with torch.no_grad():
             for i in range(num_batches):
                 start_idx = i * batch_size
                 end_idx = min((i + 1) * batch_size, self.num_classes)
-                indices = torch.arange(start_idx, end_idx, device=self.device)
-                embeds = self.tok_embeddings(indices)
+                batch_chars = [self.idx2char[j] for j in range(start_idx, end_idx)]
+                tokens = self.tokenizer(
+                    batch_chars, return_tensors='pt', add_special_tokens=False,
+                    padding=True, truncation=True, max_length=4
+                ).input_ids[:, 0].to(self.device)
+                embeds = self.normed_emb(tokens)
                 all_embeds.append(embeds)
+                all_token_ids.append(tokens)
                 if i % 10 == 0:
                     print(f"  预计算进度: {end_idx}/{self.num_classes}")
 
-        return torch.cat(all_embeds, dim=0)
+        return torch.cat(all_embeds, dim=0), torch.cat(all_token_ids, dim=0)
 
     def extract_features(self, img_tensor):
-        """使用 InternVL 完整模型提取特征"""
+        """使用 InternVL 完整模型提取特征，返回 resampler 的原始输出 (B, num_queries, D)"""
         with torch.no_grad():
-            # InternVL 的特征提取方式（参考模型内部实现）
-            # 通常是：pixel_values -> vision_model -> resampler
+            # 1. Vision model 提取原始特征 [B, 1025, 1024]
             vit_out = self.model.vision_model(img_tensor).last_hidden_state
-            
-            # Resampler 处理
-            pred = self.model.resampler(vit_out)
-            
-            # 处理输出维度
-            if pred.dim() == 3:
-                pred = pred.mean(dim=1)
-            
+
+            # 2. 处理维度：去掉 cls token
+            B = vit_out.shape[0]
+            vit_feats = vit_out[:, 1:, :]  # [B, 1024, 1024]
+
+            # 3. Reshape 为 2D 特征图 (32x32)
+            vit_feats = vit_feats.view(B, 32, 32, 1024)
+
+            # 4. Pixel shuffle 下采样 [B, 32, 32, 1024] -> [B, 16, 16, 4096]
+            n, w, h, c = vit_feats.size()
+            new_w = int(w * 0.5)
+            new_h = int(h * 0.5)
+            new_c = int(c / (0.5 * 0.5))
+            vit_feats = vit_feats.reshape(n, new_w, 2, new_h, 2, c)
+            vit_feats = vit_feats.permute(0, 1, 3, 2, 4, 5)
+            vit_feats = vit_feats.reshape(n, new_w, new_h, new_c)
+
+            # 5. 展平为序列 [B, 256, 4096]
+            vit_feats = vit_feats.view(B, -1, 4096)
+
+            # 6. MLP1 投影（关键！）
+            vit_feats = self.model.mlp1(vit_feats)
+
+            # 7. Resampler 处理，输出 (B, num_queries, D)
+            pred = self.model.resampler(vit_feats)
+
             return pred
 
     def recognize_single_char(self, char_img: Image.Image, topk: int = 3, verbose: bool = False) -> List[Dict]:
         """识别单个字符"""
-        # 确保 RGB
-        if char_img.mode != 'RGB':
-            char_img = char_img.convert('RGB')
-        
-        # Resize 到 448（InternVL 通常用这个尺寸）
-        if char_img.size != (448, 448):
-            char_img = char_img.resize((448, 448), Image.BILINEAR)
-        
-        # ToTensor 和 Normalize
-        import torchvision.transforms as T
-        transform = T.Compose([
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        img_tensor = transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
+        # 使用和 calli_align 一样的预处理
+        from utils.utils import load_image_2
+
+        img_tensor = load_image_2(char_img, input_size=448, max_num=12).to(self.device).to(torch.bfloat16)
         
         if verbose:
             print(f"    [调试] 输入: shape={img_tensor.shape}, range=[{img_tensor.min():.3f}, {img_tensor.max():.3f}]")
 
         with torch.no_grad():
-            # 提取特征（使用 InternVL 完整模型）
+            # 提取特征，pred shape: (1, num_queries, D)
             pred = self.extract_features(img_tensor)
-            
-            # 归一化并计算相似度
-            pred_norm = F.normalize(pred, dim=-1)
-            similarities = torch.mm(pred_norm, self.all_char_embeds_norm.t())
-            
+
+            # 完全对齐 vq_cos_sim 逻辑：
+            # pred: (1, num_queries, D), normed_emb.weight: (num_chars, D)
+            pred_norm = F.normalize(pred, p=2, dim=2)  # (1, num_queries, D)
+            emb_norm = F.normalize(self.all_char_embeds, p=2, dim=1)  # (num_chars, D)
+            # similarity: (1, num_queries, num_chars)
+            similarity = torch.matmul(pred_norm, emb_norm.t())
+
             if verbose:
-                print(f"    [调试] 相似度范围: [{similarities.min():.3f}, {similarities.max():.3f}]")
-            
-            # Top-K
-            values, indices = torch.topk(similarities[0], k=topk, dim=-1)
-            probs = F.softmax(values, dim=-1)
-            
+                print(f"    [调试] 相似度范围: [{similarity.min():.3f}, {similarity.max():.3f}]")
+
+            # 每个 query 各自 argmax → 得到 num_queries 个 char idx
+            query_votes = similarity[0].argmax(dim=1)  # (num_queries,)
+
+            # 统计每个字符得票数 + 累计相似度分数
+            char_scores = similarity[0].sum(dim=0)  # (num_chars,) 累计分数用于 tie-break
+            values, indices = torch.topk(char_scores, k=topk, dim=-1)
+
             # 解析结果
             results = []
-            for idx, prob in zip(indices.detach().cpu().float().numpy(), 
-                                probs.detach().cpu().float().numpy()):
+            for idx, score in zip(indices.detach().cpu().tolist(),
+                                  values.detach().cpu().float().tolist()):
                 char = self.idx2char.get(int(idx), '?')
+                # 计算该字符得了多少票
+                votes = (query_votes == idx).sum().item()
                 results.append({
                     'char': char,
-                    'confidence': float(prob),
+                    'confidence': float(score),
+                    'votes': votes,
                     'idx': int(idx)
                 })
         
@@ -304,7 +322,7 @@ class CalliReaderPipeline:
             top_candidates = self.recognize_single_char(pil_img, topk=topk, verbose=debug)
 
             best_char = top_candidates[0]['char']
-            top_str = ' | '.join([f"{c['char']}({c['confidence']*100:.0f}%)" for c in top_candidates])
+            top_str = ' | '.join([f"{c['char']}({c['confidence']:.3f},票:{c['votes']})" for c in top_candidates])
             print(f"    char_{i+1:03d}: {top_str}")
 
             results.append({

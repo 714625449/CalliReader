@@ -61,16 +61,45 @@ class CaoshuDataset(Dataset):
         return img, label
 
 
+class PadToSquare:
+    """保持比例缩放，白色填充到 448×448（可 pickle）"""
+    def __init__(self, input_size=448):
+        self.input_size = input_size
+
+    def __call__(self, img):
+        from PIL import ImageOps
+        w, h = img.size
+        max_side = max(w, h)
+        if max_side <= 200:
+            scale = 200 / max_side
+        elif max_side >= 350:
+            scale = 350 / max_side
+        else:
+            scale = 1.0
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img = img.resize((new_w, new_h), Image.BICUBIC)
+        img = ImageOps.expand(img,
+            border=(
+                (self.input_size - new_w) // 2,
+                (self.input_size - new_h) // 2,
+                (self.input_size - new_w + 1) // 2,
+                (self.input_size - new_h + 1) // 2,
+            ),
+            fill=(255, 255, 255))
+        return img
+
+
 def get_transform(split: str):
-    """訓練時做基本 augmentation，驗證/測試只做 normalize"""
+    """简化版：先用 Resize 让训练跑起来，后续再优化"""
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
     )
+
     if split == 'Training':
         return transforms.Compose([
             transforms.Resize((448, 448)),
-            transforms.RandomHorizontalFlip(),
             transforms.RandomRotation(10),
             transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
