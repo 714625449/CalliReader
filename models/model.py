@@ -74,7 +74,7 @@ def load_perceiver_resampler(path=None, num_layers=4, checkpoint=None):
         print(f"Load from {path}")
         if isinstance(checkpoint, dict):
             if 'model_state_dict' in checkpoint.keys():
-                model.load_state_dict(checkpoint['model_state_dict'])
+                state_dict = checkpoint['model_state_dict']; state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}; model.load_state_dict(state_dict)
             else:
                 raise FileNotFoundError("no key model_state_dict in ckpt")
         else:
