@@ -116,7 +116,7 @@ class CalliReaderPipeline:
     def recognize_single_char(self, char_img: Image.Image, topk: int = 3) -> List[Dict]:
         """识别单个字符，返回Top-K候选"""
         # 预处理
-        img_tensor = self.transform(char_img).unsqueeze(0).to(self.device)
+        img_tensor = self.transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
 
         # 特征提取
         vit_feats = get_visual_embed(img_tensor, self.vit, self.mlp1)
@@ -139,7 +139,7 @@ class CalliReaderPipeline:
 
         # 构建结果
         results = []
-        for idx, prob in zip(indices.cpu().numpy(), probs.cpu().numpy()):
+        for idx, prob in zip(indices.detach().cpu().float().numpy(), probs.detach().cpu().float().numpy()):
             char = self.idx2char.get(int(idx), '?')
             results.append({
                 'char': char,
