@@ -146,7 +146,7 @@ class CalliReaderPipeline:
     def recognize_single_char(self, char_img: Image.Image, topk: int = 3) -> List[Dict]:
         """识别单个字符（修复版：正确的预处理流程）"""
         # 预处理（关键：transform内部已处理ToTensor和Normalize，不要重复/255）
-        img_tensor = self.transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
+        char_img = char_img.convert('RGB').resize((224, 224)); img_tensor = self.transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
         
         # 确保模型在eval模式（双重保险）
         self.vit.eval()
