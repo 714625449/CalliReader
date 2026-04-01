@@ -72,6 +72,7 @@ class CalliReaderPipeline:
         from ultralytics import YOLO
         print("[Pipeline] 加载YOLO模型...")
         self.yolo = YOLO(yolo_model_path)
+        self.yolo_model_path = yolo_model_path
         self.conf_thres = conf_thres
 
         # 加载CalliReader模型组件
