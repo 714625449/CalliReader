@@ -1,7 +1,9 @@
-
 """
-CalliReader Pipeline - 整图识别（完整修复版 v2）
-修复重点：图像预处理与 test_caoshu_safe.py 完全一致
+CalliReader Pipeline - 整图识别（完整修复版 v2.1）
+修复重点：
+1. 添加 yolo_model_path 属性
+2. 图像预处理与 test_caoshu_safe.py 完全一致（RGB, 224x224）
+3. 强制 eval 模式和 bfloat16
 """
 import os
 import sys
@@ -68,11 +70,11 @@ class CalliReaderPipeline:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[Pipeline] 使用设备: {self.device}")
 
-        # 加载YOLO分割模型
+        # 加载YOLO分割模型（关键修复：保存路径）
         from ultralytics import YOLO
         print("[Pipeline] 加载YOLO模型...")
         self.yolo = YOLO(yolo_model_path)
-        self.yolo_model_path = yolo_model_path
+        self.yolo_model_path = yolo_model_path  # 保存路径供visualizer使用
         self.conf_thres = conf_thres
 
         # 加载CalliReader模型组件
@@ -284,9 +286,9 @@ class CalliReaderPipeline:
             print("    警告: 未检测到任何字符")
             return {'image': image_path.name, 'chars': [], 'text': ''}
 
-        # 保存可视化结果
+        # 保存可视化结果（关键修复：使用 self.yolo_model_path）
         from caoshu.visualizer import YoloVisualizer
-        viz = YoloVisualizer(self.yolo.model_path, self.conf_thres)
+        viz = YoloVisualizer(self.yolo_model_path, self.conf_thres)
         viz.detect_and_visualize(image_path, output_dir / f"{image_path.stem}_result.jpg")
 
         # 2. 排序
@@ -387,7 +389,7 @@ def main():
     parser.add_argument("--data_root", type=str,
                        default="/root/sj-tmp/datasets/CursiveChineseCalligraphyDataset/Cursive_Chinese_Calligraphy_Dataset",
                        help="数据集根目录")
-    parser.add_argument("--output", type=str, default="outputs/pipeline_fixed", help="输出目录")
+    parser.add_argument("--output", type=str, default="outputs/pipeline_final", help="输出目录")
     parser.add_argument("--conf", type=float, default=0.25, help="YOLO置信度阈值")
     parser.add_argument("--topk", type=int, default=3, help="Top-K候选数")
     parser.add_argument("--debug", action="store_true", help="调试模式（只处理前3个字，打印详细信息）")

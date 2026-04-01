@@ -1,14 +1,14 @@
+
 """
-CaoshuReader Pipeline - 整图识别
-YOLO分割 → 裁剪单字 → CalliReader识别 → Top-3输出
-修复版：强制Eval模式，正确的预处理，去除重复归一化
+CalliReader Pipeline - 整图识别（完整修复版 v2）
+修复重点：图像预处理与 test_caoshu_safe.py 完全一致
 """
 import os
 import sys
 import json
 import argparse
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 import cv2
 import torch
@@ -25,10 +25,10 @@ from models.model import (
     load_mlp1,
     load_perceiver_resampler,
     load_normed_tok_embeddings,
+    load_tokenizer,
 )
 from config.configu import DOWNSAMPLE_RATIO
 from caoshu.dataset import CaoshuDataset, get_transform
-from caoshu.visualizer import YoloVisualizer
 
 
 def pixel_shuffle(x, scale_factor=0.5):
@@ -45,7 +45,7 @@ def pixel_shuffle(x, scale_factor=0.5):
 
 @torch.no_grad()
 def get_visual_embed(imgs, vit, mlp1):
-    """提取视觉特征（包含pixel_shuffle）"""
+    """提取视觉特征（与 test_caoshu_safe.py 完全一致）"""
     vit_out = vit(imgs).last_hidden_state[:, 1:, :]
     h = w = int(vit_out.shape[1] ** 0.5)
     vit_out = vit_out.view(vit_out.shape[0], h, w, -1)
@@ -68,34 +68,35 @@ class CalliReaderPipeline:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[Pipeline] 使用设备: {self.device}")
 
-        # 1. 加载YOLO分割模型
+        # 加载YOLO分割模型
+        from ultralytics import YOLO
         print("[Pipeline] 加载YOLO模型...")
-        self.visualizer = YoloVisualizer(yolo_model_path, conf_thres)
+        self.yolo = YOLO(yolo_model_path)
+        self.yolo_model_path = yolo_model_path
+        self.conf_thres = conf_thres
 
-        # 2. 加载CalliReader模型组件（关键：全部设为eval模式）
+        # 加载CalliReader模型组件
         print("[Pipeline] 加载CalliReader模型...")
         self.vit = load_vision_model(location='cuda' if torch.cuda.is_available() else 'cpu')
         self.mlp1 = load_mlp1(DOWNSAMPLE_RATIO, location='cuda' if torch.cuda.is_available() else 'cpu')
         
-        # 加载Resampler并强制Eval模式
+        # 加载Resampler
         self.resampler = load_perceiver_resampler(None, num_layers=num_layers)
         
-        # 加载checkpoint（修复module.前缀问题）
+        # 加载checkpoint（修复module.前缀）
         if checkpoint_path and Path(checkpoint_path).exists():
             ckpt = torch.load(checkpoint_path, map_location='cpu')
             if 'model_state_dict' in ckpt:
                 state_dict = ckpt['model_state_dict']
-                # 去除DataParallel的module.前缀
                 state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
                 self.resampler.load_state_dict(state_dict)
                 print(f"[Pipeline] 加载checkpoint: {checkpoint_path} (step {ckpt.get('total_step', 'unknown')})")
         
-        # 关键：全部设为eval模式
+        # 关键：全部设为eval模式并冻结
         self.vit.eval()
         self.mlp1.eval()
         self.resampler.eval()
         
-        # 禁用梯度（加速推理）
         for p in self.vit.parameters():
             p.requires_grad = False
         for p in self.mlp1.parameters():
@@ -103,7 +104,7 @@ class CalliReaderPipeline:
         for p in self.resampler.parameters():
             p.requires_grad = False
 
-        # 3. 加载字符embedding和映射
+        # 加载字符embedding
         print("[Pipeline] 加载字符映射...")
         self.tok_embeddings = load_normed_tok_embeddings(location='cpu')
         self.tok_embeddings = self.tok_embeddings.to(self.device).to(torch.bfloat16)
@@ -115,18 +116,21 @@ class CalliReaderPipeline:
         self.num_classes = len(self.idx2char)
         print(f"[Pipeline] 字符类别数: {self.num_classes}")
 
-        # 4. 预计算所有字符的embedding（关键：eval模式+无梯度）
+        # 预计算所有字符的embedding
         print("[Pipeline] 预计算字符embeddings...")
         self.all_char_embeds = self._compute_all_char_embeddings()
         self.all_char_embeds_norm = F.normalize(self.all_char_embeds, dim=-1)
 
-        # 5. 图像预处理（关键：使用与训练完全一致的transform）
-        self.transform = get_transform('Validation')  # 不要自定义，直接用dataset的
+        # 图像预处理（使用与训练完全一致的transform）
+        self.transform = get_transform('Validation')
+
+        # 加载tokenizer
+        self.tokenizer = load_tokenizer()
 
         print("[Pipeline] 初始化完成！\n")
 
     def _compute_all_char_embeddings(self, batch_size=1000):
-        """分批计算所有字符的embedding（确保eval模式）"""
+        """分批计算所有字符的embedding"""
         self.tok_embeddings.eval()
         all_embeds = []
         num_batches = (self.num_classes + batch_size - 1) // batch_size
@@ -143,12 +147,29 @@ class CalliReaderPipeline:
 
         return torch.cat(all_embeds, dim=0)
 
-    def recognize_single_char(self, char_img: Image.Image, topk: int = 3) -> List[Dict]:
-        """识别单个字符（修复版：正确的预处理流程）"""
-        # 预处理（关键：transform内部已处理ToTensor和Normalize，不要重复/255）
-        char_img = char_img.convert('RGB').resize((224, 224)); img_tensor = self.transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
+    def recognize_single_char(self, char_img: Image.Image, topk: int = 3, verbose: bool = False) -> List[Dict]:
+        """
+        识别单个字符（关键修复：与CaoshuDataset处理完全一致）
+        """
+        # 关键修复1：确保RGB模式
+        if char_img.mode != 'RGB':
+            char_img = char_img.convert('RGB')
         
-        # 确保模型在eval模式（双重保险）
+        # 关键修复2：确保224x224（CaoshuDataset的输出尺寸）
+        if char_img.size != (224, 224):
+            char_img = char_img.resize((224, 224), Image.BILINEAR)
+        
+        # 关键修复3：应用transform（ToTensor + Normalize）
+        img_tensor = self.transform(char_img)
+        
+        # 调试信息（可选）
+        if verbose:
+            print(f"    [调试] Transform后: shape={img_tensor.shape}, range=[{img_tensor.min():.3f}, {img_tensor.max():.3f}]")
+        
+        # 添加batch维度并转到设备
+        img_tensor = img_tensor.unsqueeze(0).to(self.device).to(torch.bfloat16)
+        
+        # 确保模型在eval模式
         self.vit.eval()
         self.mlp1.eval()
         self.resampler.eval()
@@ -168,7 +189,10 @@ class CalliReaderPipeline:
             pred_norm = F.normalize(pred, dim=-1)
             similarities = torch.mm(pred_norm, self.all_char_embeds_norm.t())
             
-            # Top-K（关键：detach后再转numpy）
+            if verbose:
+                print(f"    [调试] 相似度范围: [{similarities.min():.3f}, {similarities.max():.3f}]")
+            
+            # Top-K
             values, indices = torch.topk(similarities[0], k=topk, dim=-1)
             probs = F.softmax(values, dim=-1)
             
@@ -185,9 +209,33 @@ class CalliReaderPipeline:
         
         return results
 
+    def yolo_detect(self, image_path: str):
+        """YOLO检测并返回框信息"""
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"无法读取图像: {image_path}")
+        
+        results = self.yolo(img, conf=self.conf_thres, verbose=False)
+        
+        boxes_data = []
+        for idx, box in enumerate(results[0].boxes):
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+            conf = float(box.conf[0])
+            boxes_data.append({
+                'id': idx,
+                'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                'confidence': conf,
+                'center': [(x1+x2)//2, (y1+y2)//2]
+            })
+        
+        return img, boxes_data
+
     def sort_boxes_reading_order(self, boxes_data: List[Dict], row_threshold: int = 50) -> List[Dict]:
-        """按阅读顺序排序：从上到下，从左到右（书法习惯）"""
-        # 按center_y分组（行）
+        """按阅读顺序排序：从上到下，从左到右"""
+        if not boxes_data:
+            return []
+        
+        # 按center_y排序（行）
         boxes_data.sort(key=lambda x: x['center'][1])
         
         rows = []
@@ -206,7 +254,7 @@ class CalliReaderPipeline:
         current_row.sort(key=lambda x: x['center'][0])
         rows.append(current_row)
         
-        # 合并所有行
+        # 合并
         sorted_boxes = []
         for row in rows:
             sorted_boxes.extend(row)
@@ -229,23 +277,24 @@ class CalliReaderPipeline:
 
         # 1. YOLO分割
         print("  [1/4] YOLO分割...")
-        result_img_path = output_dir / f"{image_path.stem}_result.jpg"
-        vis_img, boxes_data = self.visualizer.detect_and_visualize(
-            image_path, result_img_path
-        )
+        orig_img, boxes_data = self.yolo_detect(str(image_path))
         print(f"    检测到 {len(boxes_data)} 个字符")
         
         if len(boxes_data) == 0:
             print("    警告: 未检测到任何字符")
             return {'image': image_path.name, 'chars': [], 'text': ''}
 
-        # 2. 按阅读顺序排序（修复：正确的阅读顺序）
+        # 保存可视化结果
+        from caoshu.visualizer import YoloVisualizer
+        viz = YoloVisualizer(self.yolo.model_path, self.conf_thres)
+        viz.detect_and_visualize(image_path, output_dir / f"{image_path.stem}_result.jpg")
+
+        # 2. 排序
         print("  [2/4] 排序...")
         sorted_boxes = self.sort_boxes_reading_order(boxes_data)
 
-        # 3. 裁剪单字并识别
+        # 3. 裁剪并识别
         print("  [3/4] 识别字符...")
-        orig_img = cv2.imread(str(image_path))
         orig_img_rgb = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
         chars_dir = output_dir / 'chars'
         if save_crops:
@@ -253,13 +302,13 @@ class CalliReaderPipeline:
 
         results = []
         
-        # 测试模式：只处理前3个字（快速验证）
+        # 调试模式只处理前3个
         test_boxes = sorted_boxes[:3] if debug else sorted_boxes
         
         for i, box in enumerate(test_boxes):
             x1, y1, x2, y2 = box['bbox']
 
-            # 裁剪，加少量padding（关键：从RGB图裁剪，不是BGR）
+            # 裁剪（加padding）
             pad = 4
             h_img, w_img = orig_img.shape[:2]
             x1c = max(0, x1 - pad)
@@ -270,20 +319,24 @@ class CalliReaderPipeline:
             crop_rgb = orig_img_rgb[y1c:y2c, x1c:x2c]
 
             if crop_rgb.size == 0:
+                print(f"    char_{i+1:03d}: 裁剪失败，跳过")
                 continue
 
-            # 保存裁剪图（用于人工检查）
+            # 保存裁剪图
             if save_crops:
                 crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
                 crop_path = chars_dir / f"char_{i+1:03d}.jpg"
                 cv2.imwrite(str(crop_path), crop_bgr)
 
-            # 转PIL并识别（关键：RGB格式）
+            # 转为PIL并识别
             pil_img = Image.fromarray(crop_rgb)
-            top_candidates = self.recognize_single_char(pil_img, topk=topk)
+            top_candidates = self.recognize_single_char(
+                pil_img, 
+                topk=topk, 
+                verbose=debug  # 调试模式打印详细信息
+            )
 
             best_char = top_candidates[0]['char']
-            best_conf = top_candidates[0]['confidence']
             top_str = ' | '.join([
                 f"{c['char']}({c['confidence']*100:.0f}%)" for c in top_candidates
             ])
@@ -296,13 +349,11 @@ class CalliReaderPipeline:
                 'yolo_confidence': box['confidence'],
                 'top_candidates': top_candidates,
                 'best_char': best_char,
-                'best_confidence': best_conf,
             })
 
-        # 4. 输出结果
+        # 4. 保存结果
         print("  [4/4] 保存结果...")
-
-        # result.json
+        
         json_path = output_dir / 'result.json'
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump({
@@ -310,13 +361,13 @@ class CalliReaderPipeline:
                 'total_chars': len(results),
                 'chars': results
             }, f, ensure_ascii=False, indent=2)
-        print(f"    JSON: {json_path}")
-
-        # result.txt
+        
         text = ''.join([r['best_char'] for r in results])
         txt_path = output_dir / 'result.txt'
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write(text + '\n')
+        
+        print(f"    JSON: {json_path}")
         print(f"    TXT:  {txt_path}")
         print(f"    识别结果: {text}")
 
@@ -329,31 +380,27 @@ class CalliReaderPipeline:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CalliReader Pipeline - 整图识别（修复版）")
+    parser = argparse.ArgumentParser(description="CalliReader Pipeline - 完整修复版")
     parser.add_argument("--image", type=str, required=True, help="输入图片路径")
     parser.add_argument("--ckpt", type=str, required=True, help="CalliReader checkpoint路径")
     parser.add_argument("--yolo", type=str, default="params/best.pt", help="YOLO模型路径")
     parser.add_argument("--data_root", type=str,
                        default="/root/sj-tmp/datasets/CursiveChineseCalligraphyDataset/Cursive_Chinese_Calligraphy_Dataset",
                        help="数据集根目录")
-    parser.add_argument("--output", type=str, default="outputs/pipeline", help="输出目录")
+    parser.add_argument("--output", type=str, default="outputs/pipeline_fixed", help="输出目录")
     parser.add_argument("--conf", type=float, default=0.25, help="YOLO置信度阈值")
     parser.add_argument("--topk", type=int, default=3, help="Top-K候选数")
-    parser.add_argument("--num_layers", type=int, default=4, help="Resampler层数")
-    parser.add_argument("--debug", action="store_true", help="调试模式（只处理前3个字）")
+    parser.add_argument("--debug", action="store_true", help="调试模式（只处理前3个字，打印详细信息）")
     
     args = parser.parse_args()
 
-    # 初始化Pipeline
     pipeline = CalliReaderPipeline(
         yolo_model_path=args.yolo,
         checkpoint_path=args.ckpt,
         data_root=args.data_root,
         conf_thres=args.conf,
-        num_layers=args.num_layers
     )
 
-    # 处理图片
     result = pipeline.process_image(
         image_path=args.image,
         output_dir=args.output,
