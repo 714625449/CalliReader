@@ -1,8 +1,5 @@
 """
-CalliReader Pipeline - 整图识别（最终修复版 v2.2）
-修复：
-1. 强制 224x224（绕过 transform 的 resize）
-2. JSON 序列化 numpy 类型
+CalliReader Pipeline - 最终修复版（使用 InternVL 完整模型）
 """
 import os
 import sys
@@ -16,45 +13,15 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 import numpy as np
+from transformers import AutoModel, AutoTokenizer
+from ultralytics import YOLO
 
 # 添加项目路径
 PROJECT_ROOT = '/workspace/CalliReader'
 sys.path.insert(0, PROJECT_ROOT)
 
-from models.model import (
-    load_vision_model,
-    load_mlp1,
-    load_perceiver_resampler,
-    load_normed_tok_embeddings,
-    load_tokenizer,
-)
-from config.configu import DOWNSAMPLE_RATIO
-from caoshu.dataset import CaoshuDataset, get_transform
-import torchvision.transforms as T
-
-
-def pixel_shuffle(x, scale_factor=0.5):
-    """像素重排下采样"""
-    n, w, h, c = x.size()
-    new_w = int(w * scale_factor)
-    new_h = int(h * scale_factor)
-    new_c = int(c / (scale_factor * scale_factor))
-    x = x.reshape(n, new_w, 2, new_h, 2, c)
-    x = x.permute(0, 1, 3, 2, 4, 5)
-    x = x.reshape(n, new_w, new_h, new_c)
-    return x
-
-
-@torch.no_grad()
-def get_visual_embed(imgs, vit, mlp1):
-    """提取视觉特征"""
-    vit_out = vit(imgs).last_hidden_state[:, 1:, :]
-    h = w = int(vit_out.shape[1] ** 0.5)
-    vit_out = vit_out.view(vit_out.shape[0], h, w, -1)
-    vit_out = pixel_shuffle(vit_out, scale_factor=DOWNSAMPLE_RATIO)
-    vit_out = vit_out.view(vit_out.shape[0], -1, vit_out.shape[-1])
-    vit_out = mlp1(vit_out)
-    return vit_out
+from caoshu.dataset import CaoshuDataset
+from caoshu.visualizer import YoloVisualizer
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -70,76 +37,78 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 class CalliReaderPipeline:
-    """完整的书法识别Pipeline"""
+    """使用 InternVL 完整模型的 Pipeline"""
 
     def __init__(self,
                  yolo_model_path: str,
                  checkpoint_path: str,
                  data_root: str,
-                 conf_thres: float = 0.25,
-                 num_layers: int = 4):
+                 conf_thres: float = 0.25):
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.conf_thres = conf_thres
+        
         print(f"[Pipeline] 使用设备: {self.device}")
 
-        # 加载YOLO
-        from ultralytics import YOLO
-        print("[Pipeline] 加载YOLO模型...")
+        # 1. 加载 YOLO
+        print("[Pipeline] 加载 YOLO 模型...")
         self.yolo = YOLO(yolo_model_path)
         self.yolo_model_path = yolo_model_path
-        self.conf_thres = conf_thres
 
-        # 加载CalliReader
-        print("[Pipeline] 加载CalliReader模型...")
-        self.vit = load_vision_model(location='cuda' if torch.cuda.is_available() else 'cpu')
-        self.mlp1 = load_mlp1(DOWNSAMPLE_RATIO, location='cuda' if torch.cuda.is_available() else 'cpu')
-        self.resampler = load_perceiver_resampler(None, num_layers=num_layers)
+        # 2. 加载 InternVL 完整模型（关键！和 test_caoshu_safe.py 一致）
+        internvl_path = 'InternVL'  # 软链接指向的路径
+        print(f"[Pipeline] 加载 InternVL 完整模型: {internvl_path}")
         
-        # 加载checkpoint
-        if checkpoint_path and Path(checkpoint_path).exists():
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
-            if 'model_state_dict' in ckpt:
-                state_dict = ckpt['model_state_dict']
-                state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-                self.resampler.load_state_dict(state_dict)
-                print(f"[Pipeline] 加载checkpoint: {checkpoint_path}")
-        
-        # 强制eval模式
-        self.vit.eval()
-        self.mlp1.eval()
-        self.resampler.eval()
-        for p in self.vit.parameters():
-            p.requires_grad = False
-        for p in self.mlp1.parameters():
-            p.requires_grad = False
-        for p in self.resampler.parameters():
-            p.requires_grad = False
+        self.model = AutoModel.from_pretrained(
+            internvl_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+            local_files_only=True
+        ).eval().cuda()
 
-        # 加载字符embedding
+        # 3. 关键：替换 resampler 权重（和 test_caoshu_safe.py 完全一致）
+        print(f"[Pipeline] 加载草书权重: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location='cpu')
+        
+        if 'model_state_dict' not in ckpt:
+            raise ValueError("Checkpoint 格式错误，缺少 model_state_dict")
+        
+        state_dict = ckpt['model_state_dict']
+        
+        # 找到并替换 resampler
+        replaced = False
+        for name, module in self.model.named_modules():
+            if name == 'resampler' and hasattr(module, 'load_state_dict'):
+                # 去除 module. 前缀
+                clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                module.load_state_dict(clean_state_dict, strict=True)
+                print(f"✓ 成功替换 resampler 权重")
+                replaced = True
+                break
+        
+        if not replaced:
+            raise RuntimeError("未找到 resampler 模块，无法替换权重")
+
+        # 4. 加载其他组件
+        self.tokenizer = AutoTokenizer.from_pretrained(internvl_path, trust_remote_code=True)
+        
+        # 加载字符映射
         print("[Pipeline] 加载字符映射...")
-        self.tok_embeddings = load_normed_tok_embeddings(location='cpu')
-        self.tok_embeddings = self.tok_embeddings.to(self.device).to(torch.bfloat16)
-        self.tok_embeddings.eval()
-        
         dataset = CaoshuDataset(data_root, 'Validation', transform=None)
         self.idx2char = dataset.idx2char
         self.num_classes = len(self.idx2char)
         print(f"[Pipeline] 字符类别数: {self.num_classes}")
 
-        # 预计算embedding
-        print("[Pipeline] 预计算字符embeddings...")
+        # 预计算字符 embeddings
+        from models.model import load_normed_tok_embeddings
+        self.tok_embeddings = load_normed_tok_embeddings(location='cpu')
+        self.tok_embeddings = self.tok_embeddings.to(self.device).to(torch.bfloat16)
+        self.tok_embeddings.eval()
+        
         self.all_char_embeds = self._compute_all_char_embeddings()
         self.all_char_embeds_norm = F.normalize(self.all_char_embeds, dim=-1)
 
-        # 关键修复：手动定义transform，确保224x224和正确的归一化
-        # 不依赖get_transform，避免尺寸问题
-        self.transform = T.Compose([
-            T.Resize((224, 224)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-
-        self.tokenizer = load_tokenizer()
         print("[Pipeline] 初始化完成！\n")
 
     def _compute_all_char_embeddings(self, batch_size=1000):
@@ -160,41 +129,49 @@ class CalliReaderPipeline:
 
         return torch.cat(all_embeds, dim=0)
 
-    def recognize_single_char(self, char_img: Image.Image, topk: int = 3, verbose: bool = False) -> List[Dict]:
-        """
-        识别单个字符（关键修复：强制224x224，正确的预处理）
-        """
-        # 确保RGB
-        if char_img.mode != 'RGB':
-            char_img = char_img.convert('RGB')
-        
-        # 应用transform（已经包含Resize(224,224)）
-        img_tensor = self.transform(char_img)
-        
-        if verbose:
-            print(f"    [调试] Transform后: shape={img_tensor.shape}, range=[{img_tensor.min():.3f}, {img_tensor.max():.3f}]")
-        
-        # 确保224（双重保险）
-        if img_tensor.shape[-1] != 224 or img_tensor.shape[-2] != 224:
-            img_tensor = T.Resize((224, 224))(img_tensor)
-            if verbose:
-                print(f"    [调试] 强制resize后: shape={img_tensor.shape}")
-        
-        # 添加batch维度并转到设备
-        img_tensor = img_tensor.unsqueeze(0).to(self.device).to(torch.bfloat16)
-        
-        # 确保eval
-        self.vit.eval()
-        self.mlp1.eval()
-        self.resampler.eval()
-        
+    def extract_features(self, img_tensor):
+        """使用 InternVL 完整模型提取特征"""
         with torch.no_grad():
-            vit_feats = get_visual_embed(img_tensor, self.vit, self.mlp1)
-            pred = self.resampler(vit_feats)
+            # InternVL 的特征提取方式（参考模型内部实现）
+            # 通常是：pixel_values -> vision_model -> resampler
+            vit_out = self.model.vision_model(img_tensor).last_hidden_state
             
+            # Resampler 处理
+            pred = self.model.resampler(vit_out)
+            
+            # 处理输出维度
             if pred.dim() == 3:
                 pred = pred.mean(dim=1)
             
+            return pred
+
+    def recognize_single_char(self, char_img: Image.Image, topk: int = 3, verbose: bool = False) -> List[Dict]:
+        """识别单个字符"""
+        # 确保 RGB
+        if char_img.mode != 'RGB':
+            char_img = char_img.convert('RGB')
+        
+        # Resize 到 448（InternVL 通常用这个尺寸）
+        if char_img.size != (448, 448):
+            char_img = char_img.resize((448, 448), Image.BILINEAR)
+        
+        # ToTensor 和 Normalize
+        import torchvision.transforms as T
+        transform = T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        img_tensor = transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
+        
+        if verbose:
+            print(f"    [调试] 输入: shape={img_tensor.shape}, range=[{img_tensor.min():.3f}, {img_tensor.max():.3f}]")
+
+        with torch.no_grad():
+            # 提取特征（使用 InternVL 完整模型）
+            pred = self.extract_features(img_tensor)
+            
+            # 归一化并计算相似度
             pred_norm = F.normalize(pred, dim=-1)
             similarities = torch.mm(pred_norm, self.all_char_embeds_norm.t())
             
@@ -219,7 +196,7 @@ class CalliReaderPipeline:
         return results
 
     def yolo_detect(self, image_path: str):
-        """YOLO检测"""
+        """YOLO 检测"""
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError(f"无法读取图像: {image_path}")
@@ -272,7 +249,6 @@ class CalliReaderPipeline:
                      topk: int = 3,
                      save_crops: bool = True,
                      debug: bool = False) -> Dict:
-        """处理整图"""
 
         image_path = Path(image_path)
         output_dir = Path(output_dir)
@@ -280,8 +256,8 @@ class CalliReaderPipeline:
 
         print(f"[Pipeline] 处理图片: {image_path.name}")
 
-        # 1. YOLO分割
-        print("  [1/4] YOLO分割...")
+        # 1. YOLO 分割
+        print("  [1/4] YOLO 分割...")
         orig_img, boxes_data = self.yolo_detect(str(image_path))
         print(f"    检测到 {len(boxes_data)} 个字符")
         
@@ -290,7 +266,6 @@ class CalliReaderPipeline:
             return {'image': image_path.name, 'chars': [], 'text': ''}
 
         # 保存可视化
-        from caoshu.visualizer import YoloVisualizer
         viz = YoloVisualizer(self.yolo_model_path, self.conf_thres)
         viz.detect_and_visualize(image_path, output_dir / f"{image_path.stem}_result.jpg")
 
@@ -319,13 +294,11 @@ class CalliReaderPipeline:
             
             crop_rgb = orig_img_rgb[y1c:y2c, x1c:x2c]
             if crop_rgb.size == 0:
-                print(f"    char_{i+1:03d}: 裁剪失败，跳过")
                 continue
 
             if save_crops:
                 crop_bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
-                crop_path = chars_dir / f"char_{i+1:03d}.jpg"
-                cv2.imwrite(str(crop_path), crop_bgr)
+                cv2.imwrite(str(chars_dir / f"char_{i+1:03d}.jpg"), crop_bgr)
 
             pil_img = Image.fromarray(crop_rgb)
             top_candidates = self.recognize_single_char(pil_img, topk=topk, verbose=debug)
@@ -336,31 +309,29 @@ class CalliReaderPipeline:
 
             results.append({
                 'id': i + 1,
-                'bbox': [int(x) for x in box['bbox']],  # 确保是Python int
+                'bbox': [int(x) for x in box['bbox']],
                 'center': [int(x) for x in box['center']],
                 'yolo_confidence': float(box['confidence']),
                 'top_candidates': top_candidates,
                 'best_char': best_char,
             })
 
-        # 4. 保存结果（关键修复：使用NumpyEncoder）
+        # 4. 保存结果
         print("  [4/4] 保存结果...")
         
         json_path = output_dir / 'result.json'
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump({
                 'image': str(image_path.name),
-                'total_chars': int(len(results)),
+                'total_chars': len(results),
                 'chars': results
-            }, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)  # 使用自定义编码器
+            }, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
         
         text = ''.join([r['best_char'] for r in results])
         txt_path = output_dir / 'result.txt'
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write(text + '\n')
         
-        print(f"    JSON: {json_path}")
-        print(f"    TXT:  {txt_path}")
         print(f"    识别结果: {text}")
 
         return {
@@ -372,17 +343,17 @@ class CalliReaderPipeline:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CalliReader Pipeline - 最终修复版")
+    parser = argparse.ArgumentParser(description="CalliReader Pipeline - 最终版（InternVL完整模型）")
     parser.add_argument("--image", type=str, required=True, help="输入图片路径")
-    parser.add_argument("--ckpt", type=str, required=True, help="CalliReader checkpoint路径")
-    parser.add_argument("--yolo", type=str, default="params/best.pt", help="YOLO模型路径")
+    parser.add_argument("--ckpt", type=str, required=True, help="草书 Resampler 权重路径")
+    parser.add_argument("--yolo", type=str, default="params/best.pt", help="YOLO 模型路径")
     parser.add_argument("--data_root", type=str,
                        default="/root/sj-tmp/datasets/CursiveChineseCalligraphyDataset/Cursive_Chinese_Calligraphy_Dataset",
                        help="数据集根目录")
-    parser.add_argument("--output", type=str, default="outputs/pipeline_v2.2", help="输出目录")
-    parser.add_argument("--conf", type=float, default=0.25, help="YOLO置信度阈值")
-    parser.add_argument("--topk", type=int, default=3, help="Top-K候选数")
-    parser.add_argument("--debug", action="store_true", help="调试模式")
+    parser.add_argument("--output", type=str, default="outputs/pipeline_final", help="输出目录")
+    parser.add_argument("--conf", type=float, default=0.25, help="YOLO 置信度阈值")
+    parser.add_argument("--topk", type=int, default=3, help="Top-K 候选数")
+    parser.add_argument("--debug", action="store_true", help="调试模式（只处理前3个字）")
     
     args = parser.parse_args()
 
