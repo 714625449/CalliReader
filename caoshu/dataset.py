@@ -1,0 +1,147 @@
+"""
+CaoshuReader — dataset.py
+數據集結構：{root}/{split}/{字+版本號}/{圖片ID}.jpg
+標籤：去掉目錄名末尾的數字後綴，例如 哀1 → 哀
+"""
+
+import os
+import re
+from pathlib import Path
+from PIL import Image
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+
+
+def strip_suffix(dirname: str) -> str:
+    """哀1 → 哀，哀12 → 哀，阿 → 阿"""
+    return re.sub(r'\d+$', '', dirname)
+
+
+class CaoshuDataset(Dataset):
+    def __init__(self, root: str, split: str = 'Validation', transform=None):
+        """
+        root   : Cursive_Chinese_Calligraphy_Dataset 目錄路徑
+        split  : 'Training' | 'Validation' | 'Test'
+        """
+        self.root = Path(root) / split
+        self.transform = transform
+
+        # 建立 字→index 映射
+        all_chars = sorted(set(
+            strip_suffix(d.name)
+            for d in self.root.iterdir()
+            if d.is_dir()
+        ))
+        self.char2idx = {c: i for i, c in enumerate(all_chars)}
+        self.idx2char = {i: c for c, i in self.char2idx.items()}
+        self.num_classes = len(all_chars)
+
+        # 收集所有 (圖片路徑, label_index)
+        self.samples = []
+        for char_dir in sorted(self.root.iterdir()):
+            if not char_dir.is_dir():
+                continue
+            char = strip_suffix(char_dir.name)
+            label = self.char2idx[char]
+            for img_path in sorted(char_dir.glob('*.jpg')):
+                self.samples.append((img_path, label))
+
+        print(f"[CaoshuDataset] split={split}, "
+              f"classes={self.num_classes}, samples={len(self.samples)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        img = Image.open(img_path).convert('RGB')  # 灰階→RGB，供 VIT 使用
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
+
+class PadToSquare:
+    """保持比例缩放，白色填充到 224×224（可 pickle）"""
+    def __init__(self, input_size=224):
+        self.input_size = input_size
+
+    def __call__(self, img):
+        from PIL import ImageOps
+        w, h = img.size
+        max_side = max(w, h)
+        if max_side <= 200:
+            scale = 200 / max_side
+        elif max_side >= 350:
+            scale = 350 / max_side
+        else:
+            scale = 1.0
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img = img.resize((new_w, new_h), Image.BICUBIC)
+        img = ImageOps.expand(img,
+            border=(
+                (self.input_size - new_w) // 2,
+                (self.input_size - new_h) // 2,
+                (self.input_size - new_w + 1) // 2,
+                (self.input_size - new_h + 1) // 2,
+            ),
+            fill=(255, 255, 255))
+        return img
+
+
+def get_transform(split: str):
+    """简化版：先用 Resize 让训练跑起来，后续再优化"""
+    normalize = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+
+    if split == 'Training':
+        return transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            normalize,
+        ])
+    else:
+        return transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+
+def get_dataloader(
+    root: str,
+    split: str = 'Validation',
+    batch_size: int = 32,
+    num_workers: int = 4,
+    shuffle: bool = None,
+) -> DataLoader:
+    if shuffle is None:
+        shuffle = (split == 'Training')
+    dataset = CaoshuDataset(root, split, transform=get_transform(split))
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True,
+    ), dataset
+
+
+# ── 快速測試 ──────────────────────────────────────────────────
+if __name__ == '__main__':
+    ROOT = '/root/sj-tmp/datasets/CursiveChineseCalligraphyDataset/Cursive_Chinese_Calligraphy_Dataset'
+
+    loader, ds = get_dataloader(ROOT, split='Validation', batch_size=8)
+
+    print(f"總類別數: {ds.num_classes}")
+    print(f"樣本示例: {ds.samples[:3]}")
+
+    imgs, labels = next(iter(loader))
+    print(f"batch shape : {imgs.shape}")   # [8, 3, 96, 96]
+    print(f"label sample: {labels}")
+    print(f"label→字   : {[ds.idx2char[l.item()] for l in labels]}")

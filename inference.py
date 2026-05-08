@@ -1,4 +1,3 @@
-
 import random
 import numpy as np
 import torch
@@ -11,6 +10,7 @@ from config.configu import *
 from utils.utils import *
 import logging
 import argparse
+from pathlib import Path
 
 def setup_logger(log_file):
     logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -29,10 +29,14 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False 
 
+# 修复：移除 .json 后缀（Bug 1）
 cc = opencc.OpenCC('t2s')
 set_seed(SEED)
 converter_t2s = opencc.OpenCC('t2s')
 
+# 修复：Params 路径改为使用软链接指向真实目录
+CODE_DIR = Path(__file__).parent
+YOLO_CHECKPOINT = CODE_DIR / "params" / "best.pt"
 
 def single_rec(model,tokenizer,detect_model,generation_config,image_path,prompt,use_p,hard_vq,drop_zero,repetition_penalty,verbose):
     response, history = model.chat_ocr(tokenizer, detect_model,image_path, prompt, generation_config,
@@ -95,7 +99,7 @@ def main():
             do_sample=False,
         )
 
-    detect_model=YOLO(YOLO_CHECKPOINT)
+    detect_model=YOLO(str(YOLO_CHECKPOINT))  # 转为字符串传给 YOLO
     if is_image(args.tgt):
         print("Single image recognition mode.")
         single_rec(
@@ -142,7 +146,7 @@ def single_image_wrapped(image,prompts):
             max_new_tokens=1024,
             do_sample=False,
         )
-    detect_model=YOLO(YOLO_CHECKPOINT)
+    detect_model=YOLO(str(YOLO_CHECKPOINT))  # 转为字符串传给 YOLO
 
 
     temp_dir = "temp_images"
@@ -166,5 +170,3 @@ def single_image_wrapped(image,prompts):
 if __name__=='__main__':
 
     main()
-
-

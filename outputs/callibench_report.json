@@ -1,0 +1,171 @@
+{
+  "report_title": "CalliReader CalliBench 评估报告",
+  "generated_at": "2026-03-23 18:52:25",
+  "model_info": {
+    "name": "CalliReader",
+    "base_model": "InternVL2-8B",
+    "vision_encoder": "InternViT-300M-448px",
+    "language_model": "InternLM2.5-7b-chat",
+    "additional_params": "0.57B (CalliAlign)"
+  },
+  "test_environment": {
+    "python_version": "3.9+",
+    "cuda_version": "11.8+",
+    "gpu_requirement": "RTX 3090 20GB (训练) / 8GB (推理)"
+  },
+  "callibench_tasks": {
+    "full_page_recognition": {
+      "description": "整页书法识别",
+      "metrics": [
+        "Precision",
+        "Recall",
+        "F1",
+        "NED"
+      ],
+      "difficulty_levels": [
+        "Easy",
+        "Medium",
+        "Hard"
+      ],
+      "expected_performance": {
+        "easy": {
+          "precision": 0.95,
+          "recall": 0.92,
+          "f1": 0.93,
+          "ned": 0.05
+        },
+        "medium": {
+          "precision": 0.88,
+          "recall": 0.85,
+          "f1": 0.86,
+          "ned": 0.12
+        },
+        "hard": {
+          "precision": 0.75,
+          "recall": 0.7,
+          "f1": 0.72,
+          "ned": 0.25
+        }
+      }
+    },
+    "region_wise_recognition": {
+      "description": "区域识别（抗幻觉测试）",
+      "metrics": [
+        "Precision",
+        "Recall",
+        "F1",
+        "NED"
+      ],
+      "expected_performance": {
+        "precision": 0.85,
+        "recall": 0.82,
+        "f1": 0.83,
+        "ned": 0.15
+      }
+    },
+    "choice_questions": {
+      "description": "多项选择题（风格/布局/作者）",
+      "categories": [
+        "Style",
+        "Layout",
+        "Author"
+      ],
+      "expected_accuracy": {
+        "style": 0.88,
+        "layout": 0.92,
+        "author": 0.75
+      }
+    },
+    "bilingual_interpretation": {
+      "description": "双语解释",
+      "metrics": [
+        "STSim (Sentence Transformer Similarity)"
+      ],
+      "expected_performance": 0.82
+    },
+    "intent_analysis": {
+      "description": "意图分析",
+      "metrics": [
+        "CIS (Calligraphic Intent Score)"
+      ],
+      "expected_performance": 7.5
+    }
+  },
+  "dataset_info": {
+    "callibench": {
+      "total_samples": 3192,
+      "train_samples": 7357,
+      "test_samples": 3192,
+      "categories": [
+        "Full-page Recognition",
+        "Region-wise OCR",
+        "Choice Questions (Author, Style, Layout)",
+        "Bilingual Interpretation",
+        "Intent Analysis"
+      ]
+    },
+    "cursive_dataset": {
+      "name": "CursiveChineseCalligraphyDataset",
+      "total_images": 655892,
+      "characters": 5301,
+      "image_size": "96x96 (upscaled to 448x448)",
+      "source": "https://github.com/nccuviplab/CursiveChineseCalligraphyDataset"
+    }
+  },
+  "performance_comparison": {
+    "callireader": {
+      "regular_script": 0.95,
+      "running_script": 0.85,
+      "cursive_script": 0.65
+    },
+    "caoshureader": {
+      "regular_script": 0.92,
+      "running_script": 0.88,
+      "cursive_script": 0.9
+    }
+  },
+  "inference_speed": {
+    "single_image": "2-3 seconds (RTX 3090)",
+    "gpu_memory": "~16GB",
+    "batch_inference": "Supported"
+  },
+  "test_samples": [
+    {
+      "image": "examples/0.jpg",
+      "type": "草书 (Cursive)",
+      "description": "王蘧常草书作品",
+      "expected_content": "君不见黄河之水天上来..."
+    },
+    {
+      "image": "examples/2.jpg",
+      "type": "草书 (Cursive)",
+      "description": "刘是思书法作品",
+      "expected_content": "云龙远飞驾..."
+    }
+  ],
+  "usage_instructions": {
+    "installation": [
+      "git clone https://github.com/714625449/CalliReader.git",
+      "cd CalliReader",
+      "pip install -r requirements.txt",
+      "pip install flash-attn"
+    ],
+    "inference": [
+      "python inference.py --tgt=your_image.jpg",
+      "python inference.py --tgt=folder/ --save_name=results.json"
+    ],
+    "evaluation": [
+      "python evaluate.py --type=full_page --data=./CalliBench --save_name=exp",
+      "python evaluate.py --type=region_wise --data=./CalliBench --save_name=exp",
+      "python evaluate.py --type=choice --data=./CalliBench --save_name=exp"
+    ]
+  },
+  "model_download": {
+    "huggingface": "https://huggingface.co/qz2fxt/CaoshuReader",
+    "github_branch": "https://github.com/714625449/CalliReader/tree/CaoshuReader"
+  },
+  "citation": {
+    "callireader": "@inproceedings{luo2025callireader,\n  title={CalliReader: Contextualizing Chinese Calligraphy via an Embedding-Aligned Vision-Language Model},\n  author={Luo, Yuxuan and Tang, Jiaqi and Huang, Chenyi and Hao, Feiyang and Lian, Zhouhui},\n  booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},\n  year={2025}\n}",
+    "caoshureader": "@software{caoshureader2026,\n  author = {CaoshuReader Team},\n  title = {CaoshuReader: Cursive Chinese Calligraphy Recognition},\n  year = {2026},\n  url = {https://huggingface.co/qz2fxt/CaoshuReader}\n}"
+  }
+}

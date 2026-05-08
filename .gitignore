@@ -1,64 +1,36 @@
-# Python
+# Python 缓存（完全不该提交）
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# PyTorch
+# 模型权重（大文件，用 DVC 或外部存储管理）
 *.pth
-*.pt
+*.bin
 *.ckpt
 *.safetensors
+*.pt
+*.h5
 
-# Data
-data/
+# 数据与输出
 *.jpg
+*.jpeg
 *.png
-*.bmp
-*.json
-!examples/*.jpg
-!examples/*.json
-
-# Logs
-logs/
-*.log
-nohup.out
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Temp
-temp_images/
-results/
-temp/
-tmp/
-
-# Large files
 *.pdf
-*.zip
-*.tar.gz
-*.tar
+*.json
+datasets/
+results/
+outputs/
+visualization_output/
+
+# 符号链接（通常指向外部大文件）
+params
+InternVL
+
+# 备份目录（如果包含模型权重）
+InternVL_backup/
+
+# 环境
+.env
+*.log

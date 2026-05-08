@@ -11,7 +11,16 @@ import torchvision.transforms as T
 from PIL import Image, ImageOps
 from torchvision.transforms.functional import InterpolationMode
 import re
-import imghdr
+# import imghdr  # removed for Python 3.13 compatibility
+
+def _is_image_file(path):
+    """替代 imghdr.what() 检查文件是否为图片"""
+    try:
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except Exception:
+        return False
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -497,17 +506,14 @@ def get_image_paths(folder_path):
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             # 检查文件是否为图片
-            if imghdr.what(os.path.join(root, file)):  # imghdr.what() 可以识别图片文件类型
+            if _is_image_file(os.path.join(root, file)):  # 检查是否为图片文件
                 image_paths.append(os.path.join(root, file))
     
     return image_paths
 
 def is_image(file_path):
     try:
-        result=imghdr.what(file_path) 
-        if result is not None:
-            return True
-        return False
+        return _is_image_file(file_path)
     except:
         return False
  

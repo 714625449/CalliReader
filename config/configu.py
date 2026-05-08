@@ -3,15 +3,17 @@ import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# 项目根目录（本文件位于 config/ 下，向上退一级）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-VIT_MODEL_PATH = './params/vit_model.pt'
-MLP1_PATH = './params/params/mlp1.pth'
-TOK_EMBEDDING_PATH = './params/token_embedding.pth'
-TOKENIZER_PATH = 'InternVL'
-NORM_PARAMS_PATH='./params/gauss_norm_mu_sigma.pth'
-NORM_TOK_EMBEDDING_PATH='./params/gauss_norm.pth'
-NEW_1000_TOK_EMBEDDING_PATH='./params/new1000_token_embedding.pth'
-INTERNVL_PATH='InternVL'
+VIT_MODEL_PATH = os.path.join(PROJECT_ROOT, 'params', 'vit_model.pt')
+MLP1_PATH = os.path.join(PROJECT_ROOT, 'params', 'mlp1.pth')
+TOK_EMBEDDING_PATH = os.path.join(PROJECT_ROOT, 'params', 'token_embedding.pth')
+TOKENIZER_PATH = os.path.join(PROJECT_ROOT, 'InternVL')
+NORM_PARAMS_PATH = os.path.join(PROJECT_ROOT, 'params', 'gauss_norm_mu_sigma.pth')
+NORM_TOK_EMBEDDING_PATH = os.path.join(PROJECT_ROOT, 'params', 'gauss_norm.pth')
+NEW_1000_TOK_EMBEDDING_PATH = os.path.join(PROJECT_ROOT, 'params', 'new1000_token_embedding.pth')
+INTERNVL_PATH = os.path.join(PROJECT_ROOT, 'InternVL')
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
