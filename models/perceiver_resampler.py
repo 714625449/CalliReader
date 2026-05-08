@@ -55,15 +55,17 @@ class PerceiverResampler(nn.Module):
     def __init__(
         self,
         *,
-        dim,  
+        dim,
         depth=6,
         dim_head=64,
         heads=8,
-        num_learns=3,  
+        num_learns=3,
         ff_mult=4,
+        dropout=0.0,
     ):
         super().__init__()
         self.learns = nn.Parameter(torch.randn(num_learns, dim))
+        self.dropout = nn.Dropout(dropout)
 
         self.layers = nn.ModuleList([])
         for _ in range(depth):
@@ -84,18 +86,17 @@ class PerceiverResampler(nn.Module):
             x (torch.Tensor): image features
                 shape (b, 256, 4096)
         Returns:
-            shape (b, 3, 4096) where 3 is self.num_learns
+            shape (b, num_learns, 4096) where num_learns is self.num_learns
         """
-        b, n, d = x.shape 
+        b, n, d = x.shape
 
- 
         learns = repeat(self.learns, "n d -> b n d", b=b)
 
-       
         for attn, ff in self.layers:
-            
             learns = attn(x, learns) + learns
+            learns = self.dropout(learns)
             learns = ff(learns) + learns
+            learns = self.dropout(learns)
 
         return self.norm(learns)
     

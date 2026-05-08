@@ -66,8 +66,8 @@ def load_tokenizer():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH, trust_remote_code=True)
     return tokenizer
 
-def load_perceiver_resampler(path=None, num_layers=4, checkpoint=None):
-    model = PerceiverResampler(dim=4096, depth = num_layers).to(device).to(torch.bfloat16)
+def load_perceiver_resampler(path=None, num_layers=4, num_learns=3, dropout=0.0, checkpoint=None):
+    model = PerceiverResampler(dim=4096, depth=num_layers, num_learns=num_learns, dropout=dropout).to(device).to(torch.bfloat16)
     if checkpoint == None and path!=None:
         checkpoint = torch.load(path)
     if path is not None:

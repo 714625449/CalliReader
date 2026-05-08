@@ -62,8 +62,8 @@ class CaoshuDataset(Dataset):
 
 
 class PadToSquare:
-    """保持比例缩放，白色填充到 448×448（可 pickle）"""
-    def __init__(self, input_size=448):
+    """保持比例缩放，白色填充到 224×224（可 pickle）"""
+    def __init__(self, input_size=224):
         self.input_size = input_size
 
     def __call__(self, img):
@@ -99,7 +99,7 @@ def get_transform(split: str):
 
     if split == 'Training':
         return transforms.Compose([
-            transforms.Resize((448, 448)),
+            transforms.Resize((224, 224)),
             transforms.RandomRotation(10),
             transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
@@ -107,7 +107,7 @@ def get_transform(split: str):
         ])
     else:
         return transforms.Compose([
-            transforms.Resize((448, 448)),
+            transforms.Resize((224, 224)),
             transforms.ToTensor(),
             normalize,
         ])

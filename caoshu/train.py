@@ -5,6 +5,12 @@ CaoshuReader — train.py
 
 import os
 import sys
+
+# 强制行缓冲，确保后台运行（nohup + 重定向）时日志实时刷新
+if not sys.stdout.isatty():
+    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+    sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
+
 import glob
 import re
 import shutil
@@ -14,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 PROJECT_ROOT = '/workspace/CalliReader'
 sys.path.insert(0, PROJECT_ROOT)
@@ -52,22 +58,29 @@ def get_visual_embed(imgs, vit, mlp1):
     return vit_out
 
 
-def alignment_loss(pred, target_embed):
+def alignment_loss(pred, target_embed, label_smoothing=0.0):
     """
-    pred: (B, 3, D) - 3个query的输出
+    pred: (B, num_learns, D) - num_learns个query的输出
     target_embed: (B, D) - 目标字符embedding
+    label_smoothing: label smoothing系数（论文：0.1）
 
     改进：每个 query 都学习目标，但允许它们从不同角度学习
     """
-    # 扩展 target 到 3 个副本
-    tgt = target_embed.unsqueeze(1).expand(-1, 3, -1)  # (B, 3, D)
+    num_learns = pred.shape[1]
+    # 扩展 target 到 num_learns 个副本
+    tgt = target_embed.unsqueeze(1).expand(-1, num_learns, -1)  # (B, num_learns, D)
 
     # 归一化
     pred_norm = F.normalize(pred, dim=-1)
     tgt_norm = F.normalize(tgt, dim=-1)
 
     # 每个 query 的 cosine similarity
-    cosine_sim = (pred_norm * tgt_norm).sum(dim=-1)  # (B, 3)
+    cosine_sim = (pred_norm * tgt_norm).sum(dim=-1)  # (B, num_learns)
+
+    # Label smoothing: (1 - smoothing) * target + smoothing * uniform
+    # 对于cosine similarity，uniform target是0（随机方向）
+    if label_smoothing > 0:
+        cosine_sim = cosine_sim * (1 - label_smoothing)
 
     # 对所有 query 求平均 loss
     return (1 - cosine_sim).mean()
@@ -194,16 +207,20 @@ def get_args():
     p.add_argument('--grad_accum', type=int, default=16)
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--total_steps', type=int, default=100000)
-    p.add_argument('--log_every', type=int, default=100)
-    p.add_argument('--save_every', type=int, default=1000)
+    p.add_argument('--warmup_steps', type=int, default=10000, help='线性warmup步数（论文建议10k）')
+    p.add_argument('--log_every', type=int, default=10)
+    p.add_argument('--save_every', type=int, default=5000)
     p.add_argument('--keep_ckpts', type=int, default=5, help='保留最近N个step checkpoint（默认5，约16GB）')
     p.add_argument('--resume', type=str, default=None)
-    p.add_argument('--num_layers', type=int, default=4)
+    p.add_argument('--num_layers', type=int, default=8, help='Resampler层数（论文：8）')
+    p.add_argument('--num_learns', type=int, default=12, help='Query数量（论文：12）')
+    p.add_argument('--dropout', type=float, default=0.1, help='Dropout率（论文：0.1）')
+    p.add_argument('--label_smoothing', type=float, default=0.1, help='Label smoothing（论文：0.1）')
     p.add_argument('--skip_disk_check', action='store_true', help='跳过磁盘空间检查')
     # 验证与自动LR
-    p.add_argument('--val_every', type=int, default=1000, help='每N步在验证集上评估一次')
-    p.add_argument('--lr_patience', type=int, default=3, help='val loss停滞N次后降低LR')
-    p.add_argument('--lr_factor', type=float, default=0.5, help='LR缩减倍数')
+    p.add_argument('--val_every', type=int, default=2000, help='每N步在验证集上评估一次')
+    p.add_argument('--lr_patience', type=int, default=6, help='val loss停滞N次后降低LR')
+    p.add_argument('--lr_factor', type=float, default=0.3, help='LR缩减倍数')
     p.add_argument('--min_lr', type=float, default=1e-7, help='LR下限')
     p.add_argument('--keep_best_val', type=int, default=3, help='保留top-K最佳val loss checkpoint')
     p.add_argument('--early_stop', type=int, default=None, help='val loss连续N次无改善则停止（默认不启用）')
@@ -238,7 +255,8 @@ def main():
         p.requires_grad = False
 
     print("載入 PerceiverResampler...")
-    resampler = load_perceiver_resampler(path=None, num_layers=args.num_layers)
+    resampler = load_perceiver_resampler(path=None, num_layers=args.num_layers,
+                                         num_learns=args.num_learns, dropout=args.dropout)
     resampler = resampler.to(device).to(torch.bfloat16)
     resampler.train()
 
@@ -255,21 +273,28 @@ def main():
     dataset = CaoshuDataset(args.data_root, args.split,
                             transform=get_transform(args.split))
     loader = DataLoader(dataset, batch_size=args.batch_size,
-                        shuffle=True, num_workers=0,
-                        pin_memory=False, drop_last=True)
+                        shuffle=True, num_workers=4,
+                        pin_memory=True, drop_last=True)
 
     # 验证集
     try:
         val_dataset = CaoshuDataset(args.data_root, 'Validation', transform=get_transform('Validation'))
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                                num_workers=0, pin_memory=False, drop_last=False)
+                                num_workers=4, pin_memory=True, drop_last=False)
         print(f"验证集: {len(val_dataset)} 样本")
     except Exception as e:
         print(f"⚠️  无法加载验证集: {e}，跳过验证")
         val_loader = None
 
     optimizer = AdamW(resampler.parameters(), lr=args.lr, weight_decay=1e-2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps, eta_min=args.min_lr)
+
+    # Warmup + Cosine annealing（论文：10k步线性warmup）
+    if args.warmup_steps > 0:
+        warmup_sched = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=args.warmup_steps)
+        cosine_sched = CosineAnnealingLR(optimizer, T_max=args.total_steps - args.warmup_steps, eta_min=args.min_lr)
+        scheduler = SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[args.warmup_steps])
+    else:
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps, eta_min=args.min_lr)
 
     start_step = 0
     best_loss = float('inf')
@@ -283,14 +308,27 @@ def main():
     if args.resume:
         ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
         resampler.load_state_dict(ckpt['model_state_dict'])
-        if 'optimizer_state_dict' in ckpt:
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        if 'scheduler_state_dict' in ckpt:
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
         start_step = ckpt.get('step', 0)
         best_loss = ckpt.get('loss', float('inf'))
         best_step = start_step
         print(f"Resume from step {start_step}, previous best loss: {best_loss:.4f}")
+        
+        # 重建 optimizer 和 scheduler，避免旧版 PyTorch checkpoint 兼容性问题导致卡死
+        # （旧版 optimizer state dict 在新版 PyTorch 下可能引发死锁）
+        print("Rebuilding optimizer and scheduler from scratch...")
+        optimizer = AdamW(resampler.parameters(), lr=args.lr, weight_decay=1e-2)
+        if args.warmup_steps > 0:
+            warmup_sched = LinearLR(optimizer, start_factor=1e-3, end_factor=1.0, total_iters=args.warmup_steps)
+            cosine_sched = CosineAnnealingLR(optimizer, T_max=args.total_steps - args.warmup_steps, eta_min=args.min_lr)
+            scheduler = SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[args.warmup_steps])
+        else:
+            scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps, eta_min=args.min_lr)
+        
+        # 手动推进 scheduler 到 resume 的 step（跳过 optimizer.step 警告不影响正确性）
+        if start_step > 0:
+            for _ in range(start_step):
+                scheduler.step()
+            print(f"Scheduler advanced to step {start_step}, lr={scheduler.get_last_lr()[0]:.2e}")
         
         # 恢复训练时检查是否会超出step限制
         if start_step >= args.total_steps:
@@ -323,7 +361,7 @@ def main():
             with torch.no_grad():
                 tgt_embed = tok_embeddings(token_ids)
 
-            loss = alignment_loss(pred, tgt_embed)
+            loss = alignment_loss(pred, tgt_embed, label_smoothing=args.label_smoothing)
             loss_item = loss.item()
             (loss / args.grad_accum).backward()
 
