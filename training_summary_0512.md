@@ -1,12 +1,19 @@
-# 草书识别项目训练总结（2026-05-12）
+# 书法识别项目训练总结（2026-05-12）
 
-> 本文件合并自 `TRAINING_SUMMARY.md` 和 `log0510.md`，去重并按逻辑重新组织。
+> 本文件合并自 `TRAINING_SUMMARY.md`、`log0510.md` 和 `summary0510.md`，去重并按逻辑重新组织。
 
 ---
 
 ## 一、项目概述
 
-**CaoshuReader** 是一个基于深度学习的**草书（中国书法）单字识别系统**。
+`/caoshu/` 项目包含 **两个模型**，形成一套完整的书法识别 pipeline：
+
+| 模型 | 用途 | 训练数据 | 检查点位置 |
+|------|------|---------|-----------|
+| **CalliReader** | 通用书法VLM（整页OCR、理解、问答） | `/root/sj-tmp/callireader_models` | `InternVL/` + `params/`（软链接） |
+| **CaoshuReader** | 草书单字识别（基于CalliReader微调） | `/root/sj-tmp/datasets/CCC_split` | `/root/sj-tmp/checkpoints/CaoshuReader/` |
+
+**CaoshuReader** 是基于 **CalliReader** 微调出来的草书专用模型，只训练 `PerceiverResampler`，冻结其他所有组件。
 
 **输入**：一张书法作品的整图扫描件  
 **输出**：识别出图中每一个草书单字，并按阅读顺序排列成文本
@@ -47,14 +54,32 @@ loss = (1 - cosine_sim).mean()
 
 ## 二、组件状态
 
-| 组件 | 权重文件 | 状态 | 说明 |
-|------|----------|------|------|
-| YOLO分割 | `params/best.pt` | ✅ | 分割单字，可用 |
-| Vision Model | `params/vit_model.pt` | ✅ | 提取视觉特征，冻结 |
-| MLP1 | `params/mlp1.pth` | ✅ | 特征降维，冻结 |
-| **Resampler** | `params/callialign.pth` | 🔄 | **核心瓶颈，正在重训** |
-| Token Embeddings | `params/token_embedding.pth` | ✅ | 字符embedding，冻结 |
-| e-IT LoRA | `outputs/eit_simple_overfit/final` | ⚠️ | 辅助纠错，非主力 |
+### 2.1 核心组件
+
+| 组件 | 权重文件 | 大小 | 状态 | 说明 |
+|------|----------|------|------|------|
+| YOLO分割 | `params/best.pt` | 64MB | ✅ | 分割单字，可用 |
+| Vision Model | `params/vit_model.pt` | 608MB | ✅ | 提取视觉特征，冻结 |
+| MLP1 | `params/mlp1.pth` | 67MB | ✅ | 特征降维，冻结 |
+| **Resampler** | `params/callialign.pth` | **3.2GB** | 🔄 | **核心瓶颈，正在重训** |
+| Token Embeddings | `params/token_embedding.pth` | 758MB | ✅ | 字符embedding，冻结 |
+| Gauss Norm Embedding | `params/gauss_norm.pth` | 758MB | ✅ | 归一化token embedding |
+| OrderFormer | `params/orderformer.pth` | 26MB | ✅ | 框排序Transformer |
+| e-IT LoRA | `outputs/eit_simple_overfit/final` | 2.7GB | ⚠️ | 辅助纠错，非主力 |
+
+### 2.2 已有检查点（CaoshuReader）
+
+```
+/root/sj-tmp/checkpoints/CaoshuReader/
+├── caoshu_best.pt        (~6.4GB)  最佳模型
+├── caoshu_best_val_1.pt  (~6.4GB)
+├── caoshu_best_val_2.pt  (~6.4GB)
+├── caoshu_best_val_3.pt  (~6.4GB)
+├── caoshu_final.pt       (~6.4GB)  最终模型
+├── train.log / train_v2.log
+```
+
+> 注：当前主力训练输出在 `/root/sj-tmp/checkpoints/CaoshuReader_v2/`（step 50,000+）。
 
 ---
 
@@ -188,7 +213,21 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 > 注：47.79% 是在 61,181 大验证集上的结果，比原来 4,281 小验证集的 29% 含金量高得多。
 
-#### 3.5.5 当前状态
+#### 3.5.5 整图识别流程（`pipeline.py`）
+
+```
+输入整图书法
+  → YOLO 检测出每个字的位置框
+  → 按阅读顺序排序（从上到下、从左到右）
+  → 逐个裁剪为单字图像 (224×224)
+  → ViT + MLP1 提取视觉特征
+  → PerceiverResampler 预测 embedding
+  → 与预计算的字符 embedding 做余弦相似度
+  → 输出 Top-3 候选字 + 置信度
+  → 合并为完整识别文本
+```
+
+### 3.5.6 当前状态
 
 - **训练任务**：正在后台运行（step 50,000+/100,000）
 - **最新 checkpoint**：`caoshu_step50000.pt`
@@ -242,19 +281,51 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ---
 
-## 六、代码与数据集状态
+## 六、项目目录结构
 
-### 6.1 代码状态
+```
+/caoshu/
+├── InternVL/          → 软链接 → /root/sj-tmp/callireader_models/InternVL
+├── params/            → 软链接 → /root/sj-tmp/callireader_models/params
+├── caoshu/
+│   ├── dataset.py          CCC_split数据加载
+│   ├── pipeline.py         整图草书识别Pipeline
+│   ├── train.py            草书训练脚本
+│   ├── train_finetune.py   微调脚本
+│   ├── visualizer.py       YOLO可视化
+│   └── ...
+├── models/
+│   ├── model.py            模型加载函数
+│   ├── perceiver_resampler.py  Perceiver架构
+│   ├── get_embeds.py       嵌入提取工具
+│   └── similarity.py       VQ + Loss函数
+├── config/
+│   └── configu.py          全局配置
+├── utils/
+│   └── utils.py            图像处理、工具函数
+├── train/                  CalliReader原始训练代码 (xtuner)
+├── inference.py            CalliReader推理入口
+├── evaluate.py             CalliBench评测
+├── test_caoshu.py          草书模型测试
+└── requirements.txt
+```
+
+## 七、代码与数据集状态
+
+### 7.1 代码状态
 
 | 文件 | 状态 |
 |------|------|
 | `caoshu/train.py` | ✅ 可运行，支持 resume，已修复 module. 前缀 |
+| `caoshu/train_finetune.py` | ✅ 微调脚本（从checkpoint继续，降低lr） |
 | `test_caoshu.py` | ✅ 可运行，自推断 + dtype 转换 |
 | `caoshu/pipeline.py` | ✅ 已修正 token id + 原图裁字 + YOLO imgsz |
 | `caoshu/visualizer.py` | ✅ YOLO imgsz 参数已添加 |
 | `models/model.py` | ✅ torch.load weights_only 已明确 |
+| `inference.py` | ✅ CalliReader单图/文件夹推理入口 |
+| `evaluate.py` | ✅ CalliBench评测（整页识别、区域OCR、选择题等） |
 
-### 6.2 数据集状态
+### 7.2 数据集状态
 
 | Split | 路径 | 类别数 | 样本数 |
 |-------|------|-------|-------|
@@ -264,7 +335,7 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ---
 
-## 七、问题与修复记录
+## 八、问题与修复记录
 
 | # | 问题 | 现象 | 解决方案 |
 |---|------|------|---------|
@@ -278,13 +349,14 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ---
 
-## 八、文件索引
+## 九、文件索引
 
 | 文件 | 说明 |
 |------|------|
 | `training_summary_0512.md` | 本文档（合并版） |
 | `TRAINING_SUMMARY.md` | 详细训练总结（历史版） |
 | `log0510.md` | 逐日训练日志（历史版） |
+| `summary0510.md` | 系统架构总结（历史版） |
 | `report_0511.md` | 项目进展报告 |
 | `caoshu/train.py` | Resampler 训练脚本 |
 | `caoshu/pipeline.py` | 整图识别 Pipeline |
@@ -298,7 +370,13 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ---
 
-## 九、快速参考
+## 十、快速参考
+
+### CalliReader 单图识别
+```bash
+cd /caoshu
+python inference.py --tgt=imgs/2.jpg --prompt="这幅书法作品内容是什么？"
+```
 
 ### 启动 Resampler 训练
 ```bash
@@ -313,13 +391,23 @@ cd /caoshu && conda activate caoshu && python test_caoshu.py \
     --split=Validation --num_test=100 --batch_size=16
 ```
 
-### 整图识别 Pipeline
+### 整图识别 Pipeline（CaoshuReader）
 ```bash
 cd /caoshu && conda activate caoshu && python caoshu/pipeline.py \
     --image=imgs/2.jpg \
     --ckpt=/caoshu/params/callialign.pth \
     --data_root=/root/sj-tmp/datasets/CCC_split \
     --output=outputs/pipeline --yolo_imgsz=1344
+```
+
+### 继续训练草书模型
+```bash
+cd /caoshu/caoshu
+python train.py \
+    --data_root=/root/sj-tmp/datasets/CCC_split \
+    --save_dir=/root/sj-tmp/checkpoints/CaoshuReader \
+    --resume=/root/sj-tmp/checkpoints/CaoshuReader/caoshu_best.pt \
+    --total_steps=150000
 ```
 
 ### 加载 e-IT LoRA 推理
