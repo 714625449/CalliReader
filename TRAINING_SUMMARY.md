@@ -1,0 +1,209 @@
+# 草书识别项目训练总结
+
+## 一、项目架构
+
+```
+整图草书识别 Pipeline（分离式架构）：
+
+[图片] → YOLO分割(best.pt) → [单字图片]
+    ↓
+Vision Model(vit_model.pt) → MLP1(mlp1.pth) → [视觉特征]
+    ↓
+Resampler(callialign.pth) → [字符embedding]
+    ↓
+与预计算字符embedding匹配 → Top-3候选字
+    ↓
+后处理（阅读顺序排序 + 可选LLM纠错）→ [最终文本]
+```
+
+**核心组件状态：**
+| 组件 | 权重文件 | 状态 |
+|------|----------|------|
+| YOLO分割 | `params/best.pt` | ✅ 可用 |
+| Vision Model | `params/vit_model.pt` | ✅ 冻结 |
+| MLP1 | `params/mlp1.pth` | ✅ 冻结 |
+| Resampler | `params/callialign.pth` | 🔄 **正在重训** |
+| Token Embeddings | `params/token_embedding.pth` | ✅ 冻结 |
+| e-IT LoRA | `outputs/eit_simple_overfit/final` | ✅ 可用（辅助） |
+
+---
+
+## 二、训练历程
+
+### 阶段1：Resampler 初训（callialign.pth）
+
+| 配置 | 数值 |
+|------|------|
+| 数据集 | Cursive_Chinese_Calligraphy_Dataset |
+| 训练样本 | **6,493** |
+| 验证样本 | 4,281 |
+| 训练步数 | 50,000 |
+| Best Loss | 0.086 |
+| **Validation Top-1** | **29%** |
+| **Validation Top-5** | 约 50% |
+
+**结论**：6,493 样本太少，Resampler 严重欠拟合，29% Top-1 是主要瓶颈。
+
+---
+
+### 阶段2：e-IT LoRA 微调（language_model）
+
+试图用 539 个纯草书样本微调 InternVL 的 LLM，让模型学会"读"草书文本。
+
+| 配置 | 数值 |
+|------|------|
+| 数据 | 539 个 e-IT 样本（预计算 embedding） |
+| 微调范围 | 仅 LLM，LoRA r=128, alpha=256 |
+| 优化器 | AdamW8bit |
+| Epoch | 10 |
+| 最终 Loss | 0.0591 |
+
+**测试结果：**
+- ✅ **基线 InternVL**：完全不会读草书，输出重复/幻觉
+- ✅ **LoRA 后**：治好了重复问题，能输出相关内容
+- ❌ **但准确性不高**：字符串匹配准确率 0%，实际内容命中率约 80%
+
+**根本原因**：
+```
+e-IT 训练时的 visual 路径：
+  图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → LoRA LLM
+
+端到端测试时的 visual 路径：
+  图片 → InternVL原始Resampler → normed_emb+mu_sigma → <IMG_CONTEXT> → LoRA LLM
+
+两个 Resampler 提取的视觉特征完全不同 → LoRA 知识无法迁移
+```
+
+---
+
+### 阶段3：端到端图片识别测试
+
+直接用 InternVL + LoRA 对草书图片做 OCR：
+
+| 图片 | 基线输出 | LoRA 输出 |
+|------|----------|-----------|
+| 2.jpg | 重复"云飞远天"80次 | 雪龙远飞天马行地尘色年 |
+| 6.jpg | 问陵墓问题 | 国破山河花柳春柔... |
+| 10.jpg | 清风明月本无价... | 清风明月本无心... |
+
+**关键教训**：
+1. **Loss 低 ≠ 效果好**：Loss 0.059 只是拟合了训练数据格式
+2. **Visual 路径一致性至关重要**：训练和推理的 visual 处理必须一致
+3. **539 样本严重过拟合**：模型记住了训练样本，不是学会草书规律
+
+---
+
+### 阶段4：Resampler 大数据集恢复训练（🔄 进行中）
+
+**数据集合并：**
+| 数据集 | Training 样本 | 字符数 |
+|--------|--------------|--------|
+| CCC_split | 10,425 | 8,398 |
+| Original | 6,493 | 5,300 |
+| V2 | 3,456 | 2,353 |
+| **合并后** | **974,113** | **8,398** |
+
+**训练配置：**
+- 从 callialign.pth 恢复
+- batch=16, grad_accum=4, lr=5e-5
+- 目标 100,000 步
+- 验证集：CCC_split/Validation（61,181 样本）
+
+**中间结果（step 6,000）：**
+| 指标 | 数值 |
+|------|------|
+| Best Loss | 0.4658 @ step 5421 |
+| Validation Top-1 | **23.30%** @ step 5000 |
+| Validation Top-5 | 39.05% @ step 5000 |
+
+> 注：23.30% 比原来的 29% 低，是因为验证集从 4,281 扩大到 **61,181**，更严格、更真实。不是模型变差了。
+
+---
+
+## 三、核心教训
+
+### 教训1：数据量是第一位
+- 6,493 样本 → 29%（不够用）
+- 974,113 样本 → 目标 40%+（ hopefully ）
+
+### 教训2：Visual 路径必须一致
+- e-IT 训练用的 callialign.pth Resampler
+- 端到端测试用的 InternVL 原始 Resampler
+- 两者不兼容 → LoRA 知识白费
+
+### 教训3：不要迷信 Loss
+- e-IT Loss 0.059 看起来很好
+- 但实际生成质量差（幻觉、重复、过拟合）
+- 必须做实际推理测试验证
+
+### 教训4：验证集规模影响准确率观感
+- 小验证集（4,281）：29%（虚高）
+- 大验证集（61,181）：23%（更真实）
+- 验证集越大，指标越可靠
+
+### 教训5：磁盘管理
+- 每个 checkpoint 3.2GB
+- 训练 100,000 步需保存 20 个 → 64GB
+- 必须自动清理旧 checkpoint
+
+---
+
+## 四、当前训练思路
+
+```
+┌─────────────────────────────────────────────────────┐
+│  核心目标：提升 Resampler Top-1 准确率               │
+│  当前瓶颈：29% → 目标 40%+                           │
+│  核心手段：数据量从 6K 扩大到 974K（150倍）          │
+└─────────────────────────────────────────────────────┘
+```
+
+### 为什么保持分离架构？
+
+端到端 InternVL + LoRA 的问题：
+- ❌ Visual 路径不兼容
+- ❌ 需要重新训练 Resampler 与 InternVL 匹配
+- ❌ 539 样本训 LLM 严重过拟合
+
+分离架构的优势：
+- ✅ Resampler 直接输出 embedding，可解释性强
+- ✅ YOLO 分割 + 逐字识别，错误可定位
+- ✅ 可以单独优化每个环节
+
+### 未来可能的增强方向
+
+1. **Resampler 继续训练**（当前重点）
+   - 大数据集 + 更多步数
+   - 尝试不同 lr、batch size
+
+2. **LLM 后处理纠错**（e-IT LoRA 的用途）
+   - Resampler 输出 Top-3 候选
+   - 用 LoRA 微调的 LLM 做上下文语义选择
+   - 不是直接读图，而是辅助纠错
+
+3. **数据增强**
+   - 旋转、模糊、对比度变化
+   - 合成更多草书样本
+
+4. **阅读顺序优化**
+   - YOLO 分割后的字序排列算法改进
+
+---
+
+## 五、文件索引
+
+| 文件 | 说明 |
+|------|------|
+| `log0510.md` | 完整训练日志（本文件的前身） |
+| `caoshu/train.py` | Resampler 训练脚本 |
+| `caoshu/pipeline.py` | 整图识别 Pipeline |
+| `scripts/eit_train_simple.py` | e-IT 初始训练脚本 |
+| `scripts/eit_train_resume.py` | e-IT 恢复训练脚本 |
+| `scripts/e2e_image_test.py` | 端到端图片测试脚本 |
+| `scripts/merge_datasets.py` | 数据集合并脚本 |
+| `scripts/resume_resampler_train.sh` | Resampler 恢复训练启动脚本 |
+
+---
+
+*更新时间：2026-05-11*
+*当前训练任务：Resampler 恢复训练（step 5000+ / 100000）*
