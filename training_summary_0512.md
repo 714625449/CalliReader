@@ -11,7 +11,7 @@
 | 模型 | 用途 | 训练数据 | 检查点位置 |
 |------|------|---------|-----------|
 | **CalliReader** | 通用书法VLM（整页OCR、理解、问答） | `/root/sj-tmp/callireader_models` | `InternVL/` + `params/`（软链接） |
-| **CaoshuReader** | 草书单字识别（基于CalliReader微调） | `/root/sj-tmp/datasets/CCC_split` | `/root/sj-tmp/checkpoints/CaoshuReader/` |
+| **CaoshuReader** | 草书单字识别（基于CalliReader微调） | `/root/sj-tmp/datasets/CaoshuMerged` | `/root/sj-tmp/checkpoints/CaoshuReader_v2/` |
 
 **CaoshuReader** 是基于 **CalliReader** 微调出来的草书专用模型，只训练 `PerceiverResampler`，冻结其他所有组件。
 
@@ -58,28 +58,28 @@ loss = (1 - cosine_sim).mean()
 
 | 组件 | 权重文件 | 大小 | 状态 | 说明 |
 |------|----------|------|------|------|
-| YOLO分割 | `params/best.pt` | 64MB | ✅ | 分割单字，可用 |
-| Vision Model | `params/vit_model.pt` | 608MB | ✅ | 提取视觉特征，冻结 |
-| MLP1 | `params/mlp1.pth` | 67MB | ✅ | 特征降维，冻结 |
+| YOLO分割 | `params/best.pt` | 62MB | ✅ | 分割单字，可用 |
+| Vision Model | `params/vit_model.pt` | 580MB | ✅ | 提取视觉特征，冻结 |
+| MLP1 | `params/mlp1.pth` | 65MB | ✅ | 特征降维，冻结 |
 | **Resampler** | `params/callialign.pth` | **3.2GB** | 🔄 | **核心瓶颈，正在重训** |
-| Token Embeddings | `params/token_embedding.pth` | 758MB | ✅ | 字符embedding，冻结 |
-| Gauss Norm Embedding | `params/gauss_norm.pth` | 758MB | ✅ | 归一化token embedding |
+| Token Embeddings | `params/token_embedding.pth` | 724MB | ✅ | 字符embedding，冻结 |
+| Gauss Norm Embedding | `params/gauss_norm.pth` | 724MB | ✅ | 归一化token embedding |
+| New1000 Token Embedding | `params/new1000_token_embedding.pth` | 724MB | ✅ | 扩展token embedding |
 | OrderFormer | `params/orderformer.pth` | 26MB | ✅ | 框排序Transformer |
 | e-IT LoRA | `outputs/eit_simple_overfit/final` | 2.7GB | ⚠️ | 辅助纠错，非主力 |
 
-### 2.2 已有检查点（CaoshuReader）
+### 2.2 当前训练检查点
 
 ```
-/root/sj-tmp/checkpoints/CaoshuReader/
-├── caoshu_best.pt        (~6.4GB)  最佳模型
-├── caoshu_best_val_1.pt  (~6.4GB)
-├── caoshu_best_val_2.pt  (~6.4GB)
-├── caoshu_best_val_3.pt  (~6.4GB)
-├── caoshu_final.pt       (~6.4GB)  最终模型
-├── train.log / train_v2.log
-```
+/root/sj-tmp/checkpoints/CaoshuReader_v2/        (当前主力)
+├── caoshu_best.pt        (3.2GB)  最佳模型 (step 49761, loss 0.1751)
+├── caoshu_step40000.pt   (3.2GB)
+├── caoshu_step45000.pt   (3.2GB)
+└── caoshu_step50000.pt   (3.2GB)  当前最新
 
-> 注：当前主力训练输出在 `/root/sj-tmp/checkpoints/CaoshuReader_v2/`（step 50,000+）。
+/root/sj-tmp/checkpoints/CaoshuReader_lr5e5/     (历史实验)
+└── caoshu_best.pt        (3.2GB)  step 20605, loss 0.590
+```
 
 ---
 
@@ -97,7 +97,7 @@ loss = (1 - cosine_sim).mean()
 | **Validation Top-1** | **29%** |
 | **Validation Top-5** | 约 50% |
 
-**结论**：6,493 样本太少，Resampler 严重欠拟合，29% Top-1 是主要瓶颈。
+**结论**：655,742 样本（正楷+草书混合）不足以学好纯草书分类，Resampler 欠拟合，29% Top-1 是主要瓶颈。
 
 ---
 
@@ -170,9 +170,9 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 | 数据集 | Training 样本 | 字符数 | 说明 |
 |--------|--------------|--------|------|
-| CCC_split | 10,425 | 8,398 | 纯草书，主要来源 |
-| Original (Cursive_Chinese_Calligraphy_Dataset) | 6,493 | 5,300 | 正楷+草书混合 |
-| V2 | 3,456 | 2,353 | 补充数据 |
+| CCC_split | **338,870** | 8,398 | 纯草书，主要来源 |
+| Original (Cursive_Chinese_Calligraphy_Dataset) | **655,742** | 5,300 | 正楷+草书混合 |
+| V2 | **300,743** | 2,353 | 补充数据 |
 | **合并后** | **974,113** | **8,398** | 符号链接合并，不复制 |
 
 合并路径: `/root/sj-tmp/datasets/CaoshuMerged/Training`  
@@ -207,11 +207,11 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 | 模型 | 训练样本 | 验证集 | Top-1 | Top-5 |
 |------|---------|--------|-------|-------|
-| callialign.pth（旧） | 6,493 | 4,281（小） | **29%** | ~50% |
+| callialign.pth（旧） | **655,742** | 7,724（小） | **29%** | ~50% |
 | **新模型 @ step 50,000** | **974,113** | **61,181（大）** | **47.79%** | **69.81%** |
 | **提升幅度** | — | — | **+18.8%** | **+19.8%** |
 
-> 注：47.79% 是在 61,181 大验证集上的结果，比原来 4,281 小验证集的 29% 含金量高得多。
+> 注：47.79% 是在 61,181 大验证集上的结果，比原来 7,724 小验证集的 29% 含金量高得多。
 
 #### 3.5.5 整图识别流程（`pipeline.py`）
 
@@ -240,7 +240,7 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ## 四、关键教训
 
-1. **数据量决定上限**：6K 样本 → 29%，974K 样本 → 47.79%（目标 50%+）
+1. **数据量决定上限**：655K 样本 → 29%，974K 样本 → 47.79%（目标 50%+）
 2. **Visual 路径必须一致**：训练和推理用不同 Resampler = 白训
 3. **Loss 低不等于效果好**：e-IT Loss 0.059 但实际幻觉严重
 4. **验证集规模影响指标观感**：大验证集（61K）比小验证集（4K）更真实可靠
@@ -331,7 +331,7 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 |-------|------|-------|-------|
 | Training (合并) | `/root/sj-tmp/datasets/CaoshuMerged/Training` | 8,398 | 974,113 |
 | Validation | `/root/sj-tmp/datasets/CCC_split/Validation` | 7,440 | 61,181 |
-| Test | `/root/sj-tmp/datasets/CCC_split/Test` | — | 4,052 |
+| Test | `/root/sj-tmp/datasets/CCC_split/Test` | 4,050 | 14,756 |
 
 ---
 
@@ -364,7 +364,11 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 | `caoshu/dataset.py` | 数据集加载 |
 | `scripts/eit_train_simple.py` | e-IT 初始训练脚本 |
 | `scripts/eit_train_resume.py` | e-IT 恢复训练脚本 |
+| `scripts/eit_inference_test.py` | e-IT 推理测试脚本 |
 | `scripts/e2e_image_test.py` | 端到端图片测试脚本 |
+| `scripts/build_eit_dataset.py` | e-IT 数据集构建 |
+| `scripts/precompute_samples_embeddings.py` | 样本 embedding 预计算 |
+| `scripts/smoke_test_generate.py` | 冒烟测试样本生成 |
 | `scripts/merge_datasets.py` | 数据集合并工具 |
 | `scripts/resume_resampler_train.sh` | Resampler 恢复训练启动脚本 |
 
@@ -404,10 +408,11 @@ cd /caoshu && conda activate caoshu && python caoshu/pipeline.py \
 ```bash
 cd /caoshu/caoshu
 python train.py \
-    --data_root=/root/sj-tmp/datasets/CCC_split \
-    --save_dir=/root/sj-tmp/checkpoints/CaoshuReader \
-    --resume=/root/sj-tmp/checkpoints/CaoshuReader/caoshu_best.pt \
-    --total_steps=150000
+    --data_root=/root/sj-tmp/datasets/CaoshuMerged/Training \
+    --save_dir=/root/sj-tmp/checkpoints/CaoshuReader_v2 \
+    --resume=/root/sj-tmp/checkpoints/CaoshuReader_v2/caoshu_best.pt \
+    --total_steps=150000 \
+    --batch_size=16 --grad_accum=4 --lr=5e-5
 ```
 
 ### 加载 e-IT LoRA 推理
