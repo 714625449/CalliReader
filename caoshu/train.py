@@ -14,9 +14,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
-PROJECT_ROOT = '/workspace/CalliReader'
+PROJECT_ROOT = '/caoshu'
 sys.path.insert(0, PROJECT_ROOT)
 
 from models.model import (
@@ -57,6 +57,33 @@ def alignment_loss(pred, target_embed):
     pred_norm = F.normalize(pred, dim=-1)
     cosine_sim = (pred_norm * tgt).sum(dim=-1)
     return (1 - cosine_sim).mean()
+
+
+@torch.no_grad()
+def evaluate_topk(resampler, vit, mlp1, tok_embeddings, val_loader,
+                  all_char_embeds, device, topk=5):
+    """在 Validation 集上评估 Top-1 和 Top-K 准确率"""
+    resampler.eval()
+    top1_correct = topk_correct = total = 0
+
+    for imgs, labels in val_loader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            vit_feats = get_visual_embed(imgs, vit, mlp1)
+            pred = resampler(vit_feats)
+
+        pred = pred.mean(dim=1).float()
+        pred_norm = F.normalize(pred, dim=-1)
+        similarities = torch.mm(pred_norm, all_char_embeds.t())
+        _, topk_pred = similarities.topk(topk, dim=1)
+
+        top1_correct += (topk_pred[:, 0] == labels).sum().item()
+        topk_correct += (topk_pred == labels.unsqueeze(1)).any(dim=1).sum().item()
+        total += labels.size(0)
+
+    resampler.train()
+    return top1_correct / total, topk_correct / total
 
 
 def get_disk_usage(path):
@@ -168,7 +195,25 @@ def main():
         p.requires_grad = False
 
     print("載入 PerceiverResampler...")
-    resampler = load_perceiver_resampler(path=None, num_layers=args.num_layers)
+    num_layers = args.num_layers
+    num_learns = None
+    if args.resume:
+        ckpt_meta = torch.load(args.resume, map_location='cpu', weights_only=False)
+        state_dict = ckpt_meta['model_state_dict']
+        layer_indices = set()
+        for k in state_dict.keys():
+            if k.startswith('layers.'):
+                layer_idx = int(k.split('.')[1])
+                layer_indices.add(layer_idx)
+        num_layers = max(layer_indices) + 1 if layer_indices else args.num_layers
+        num_learns = state_dict['learns'].shape[0] if 'learns' in state_dict else None
+        print(f"  从 checkpoint 推断: num_layers={num_layers}, num_learns={num_learns}")
+    
+    resampler = load_perceiver_resampler(path=None, num_layers=num_layers)
+    if num_learns is not None and resampler.learns.shape[0] != num_learns:
+        resampler.learns = torch.nn.Parameter(
+            torch.randn(num_learns, 4096, device=device, dtype=torch.bfloat16)
+        )
     resampler = resampler.to(device).to(torch.bfloat16)
     resampler.train()
 
@@ -189,19 +234,47 @@ def main():
                         pin_memory=True, drop_last=True)
 
     optimizer = AdamW(resampler.parameters(), lr=args.lr, weight_decay=1e-2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.total_steps, eta_min=1e-6)
+    scheduler = CosineAnnealingWarmRestarts(
+        optimizer, T_0=5000, T_mult=2, eta_min=1e-7
+    )
 
     start_step = 0
     best_loss = float('inf')
     best_step = 0
     
+    # 加载 Validation 数据集和预计算字符 embedding（用于评估）
+    val_dataset = CaoshuDataset(args.data_root, 'Validation', transform=get_transform('Validation'))
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
+                            shuffle=False, num_workers=4, pin_memory=True)
+    all_chars = [val_dataset.idx2char[i] for i in range(len(val_dataset.idx2char))]
+    all_embeds = []
+    for i in range(0, len(all_chars), 100):
+        batch_chars = all_chars[i:i+100]
+        batch_tokens = tokenizer(batch_chars, return_tensors='pt', add_special_tokens=False,
+                               padding=True, truncation=True, max_length=4).input_ids[:, 0].to(device)
+        with torch.no_grad():
+            batch_embeds = tok_embeddings(batch_tokens)
+        all_embeds.append(batch_embeds)
+    all_embeds = torch.cat(all_embeds, dim=0)
+    all_char_embeds_norm = F.normalize(all_embeds, dim=-1).float()
+    print(f"[Val] Precomputed {len(all_chars)} character embeddings for evaluation")
+
     if args.resume:
-        ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
-        resampler.load_state_dict(ckpt['model_state_dict'])
+        ckpt = ckpt_meta if 'ckpt_meta' in dir() else torch.load(args.resume, map_location='cpu', weights_only=False)
+        state_dict = ckpt['model_state_dict']
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        resampler.load_state_dict(state_dict)
         if 'optimizer_state_dict' in ckpt:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         if 'scheduler_state_dict' in ckpt:
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            try:
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            except Exception as e:
+                print(f"⚠️  Scheduler state load failed (type mismatch expected): {e}")
+                print(f"   Resetting scheduler to step {ckpt.get('step', 0)}")
+                # CosineAnnealingWarmRestarts 无法直接从旧 scheduler 恢复，手动推进
+                for _ in range(ckpt.get('step', 0)):
+                    scheduler.step()
         start_step = ckpt.get('step', 0)
         best_loss = ckpt.get('loss', float('inf'))
         best_step = start_step
@@ -215,32 +288,54 @@ def main():
     step = start_step
     optimizer.zero_grad()
     loss_item = float('inf')  # 初始化，避免未定义错误
+    measured = False
 
     while step < args.total_steps:
         for imgs, labels in loader:
             if step >= args.total_steps:
                 break
 
-            imgs = imgs.to(device).to(torch.bfloat16)
+            imgs = imgs.to(device)
 
-            vit_feats = get_visual_embed(imgs, vit, mlp1)
-            pred = resampler(vit_feats)
+            if not measured:
+                torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats()
 
-            chars = [dataset.idx2char[l.item()] for l in labels]
-            token_ids = tokenizer(
-                chars,
-                return_tensors='pt',
-                add_special_tokens=False,
-                padding=True,
-                truncation=True,
-                max_length=4,
-            ).input_ids[:, 0].to(device)
+            # ========== 冻结模块：no_grad + autocast(bf16) ==========
             with torch.no_grad():
-                tgt_embed = tok_embeddings(token_ids)
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                    vit_feats = get_visual_embed(imgs, vit, mlp1)
+            # =========================================================
 
-            loss = alignment_loss(pred, tgt_embed)
+            # ========== 可训练模块：autocast(bf16) + backward ==========
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                pred = resampler(vit_feats)
+
+                chars = [dataset.idx2char[l.item()] for l in labels]
+                token_ids = tokenizer(
+                    chars,
+                    return_tensors='pt',
+                    add_special_tokens=False,
+                    padding=True,
+                    truncation=True,
+                    max_length=4,
+                ).input_ids[:, 0].to(device)
+
+                with torch.no_grad():
+                    tgt_embed = tok_embeddings(token_ids)
+
+                loss = alignment_loss(pred, tgt_embed)
+            # =========================================================
+
             loss_item = loss.item()
             (loss / args.grad_accum).backward()
+
+            if not measured:
+                peak = torch.cuda.max_memory_allocated() / 1024**3
+                total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                print(f"\n[显存实测] 首个 batch 峰值: {peak:.2f} GB / {total:.2f} GB 总显存")
+                print(f"           若接近上限，建议降低 --batch_size 或 --grad_accum")
+                measured = True
 
             if (step + 1) % args.grad_accum == 0:
                 nn.utils.clip_grad_norm_(resampler.parameters(), 1.0)
@@ -253,6 +348,14 @@ def main():
             if step % args.log_every == 0:
                 print(f"step={step:6d} | loss={loss_item:.4f} | "
                       f"lr={scheduler.get_last_lr()[0]:.2e} | best={best_loss:.4f}@{best_step}")
+
+            # 每 1000 步评估 Validation 准确率
+            if step % 1000 == 0 and step > 0:
+                top1_acc, top5_acc = evaluate_topk(
+                    resampler, vit, mlp1, tok_embeddings, val_loader,
+                    all_char_embeds_norm, device, topk=5
+                )
+                print(f"  [Val] Top-1: {top1_acc:.2%}, Top-5: {top5_acc:.2%}")
 
             # 每 save_every 步保存常规 checkpoint
             if step % args.save_every == 0:
