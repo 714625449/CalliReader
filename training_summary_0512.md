@@ -25,7 +25,7 @@
     ↓
 Vision Model(vit_model.pt) → MLP1(mlp1.pth) → [视觉特征]
     ↓
-Resampler(callialign.pth) → [字符embedding]
+Resampler(callialign_v2.pth) → [字符embedding]
     ↓
 与预计算字符embedding匹配 → Top-K候选字
     ↓
@@ -61,7 +61,7 @@ loss = (1 - cosine_sim).mean()
 | YOLO分割 | `params/best.pt` | 62MB | ✅ | 分割单字，可用 |
 | Vision Model | `params/vit_model.pt` | 580MB | ✅ | 提取视觉特征，冻结 |
 | MLP1 | `params/mlp1.pth` | 65MB | ✅ | 特征降维，冻结 |
-| **Resampler** | `params/callialign.pth` | **3.2GB** | 🔄 | **核心瓶颈，正在重训** |
+| **Resampler** | **`params/callialign_v2.pth`** | **3.2GB** | ✅ | **重训完成，最佳模型 callialign_v2.pth** |
 | Token Embeddings | `params/token_embedding.pth` | 724MB | ✅ | 字符embedding，冻结 |
 | Gauss Norm Embedding | `params/gauss_norm.pth` | 724MB | ✅ | 归一化token embedding |
 | New1000 Token Embedding | `params/new1000_token_embedding.pth` | 724MB | ✅ | 扩展token embedding |
@@ -215,10 +215,10 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 | 模型 | 训练样本 | 验证集 | Top-1 | Top-5 |
 |------|---------|--------|-------|-------|
 | callialign.pth（旧） | **655,742** | 7,724（小） | **29%** | ~50% |
-| **新模型 @ step 93,000** | **974,113** | **61,181（大）** | **53.19%** | **74.42%** |
-| **提升幅度** | — | — | **+24.2%** | **+24.4%** |
+| **新模型 @ step 100,000** | **974,113** | **61,181（大）** | **53.83%** | **74.91%** |
+| **提升幅度** | — | — | **+24.8%** | **+24.9%** |
 
-> 注：53.19% 是在 61,181 大验证集上的结果，比原来 7,724 小验证集的 29% 含金量高得多。
+> 注：53.83% 是在 61,181 大验证集上的结果，比原来 7,724 小验证集的 29% 含金量高得多。最佳模型（caoshu_best.pt）在 step 91,877，loss 0.1400。
 
 #### 3.5.5 整图识别流程（`pipeline.py`）
 
@@ -418,7 +418,7 @@ cd /caoshu && bash scripts/resume_resampler_train.sh
 ### 测试单字准确率
 ```bash
 cd /caoshu && conda activate caoshu && python test_caoshu.py \
-    --ckpt=/caoshu/params/callialign.pth \
+    --ckpt=/caoshu/params/callialign_v2.pth \
     --data_root=/root/sj-tmp/datasets/CCC_split \
     --split=Validation --num_test=100 --batch_size=16
 ```
@@ -427,7 +427,7 @@ cd /caoshu && conda activate caoshu && python test_caoshu.py \
 ```bash
 cd /caoshu && conda activate caoshu && python caoshu/pipeline.py \
     --image=imgs/2.jpg \
-    --ckpt=/caoshu/params/callialign.pth \
+    --ckpt=/caoshu/params/callialign_v2.pth \
     --data_root=/root/sj-tmp/datasets/CCC_split \
     --output=outputs/pipeline --yolo_imgsz=1344
 ```
