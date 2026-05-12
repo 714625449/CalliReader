@@ -17,7 +17,7 @@ from PIL import Image
 import numpy as np
 
 # 添加项目路径
-PROJECT_ROOT = '/workspace/CalliReader'
+PROJECT_ROOT = '/caoshu'
 sys.path.insert(0, PROJECT_ROOT)
 
 from models.model import (
@@ -25,6 +25,7 @@ from models.model import (
     load_mlp1,
     load_perceiver_resampler,
     load_normed_tok_embeddings,
+    load_tokenizer,
 )
 from config.configu import DOWNSAMPLE_RATIO
 from caoshu.dataset import CaoshuDataset, get_transform
@@ -77,18 +78,41 @@ class CalliReaderPipeline:
         self.vit = load_vision_model(location='cuda' if torch.cuda.is_available() else 'cpu')
         self.mlp1 = load_mlp1(DOWNSAMPLE_RATIO, location='cuda' if torch.cuda.is_available() else 'cpu')
         
-        # 加载Resampler并强制Eval模式
-        self.resampler = load_perceiver_resampler(None, num_layers=num_layers)
-        
-        # 加载checkpoint（修复module.前缀问题）
+        # 从 checkpoint 推断模型结构（兼容不同 num_layers / num_learns）
         if checkpoint_path and Path(checkpoint_path).exists():
-            ckpt = torch.load(checkpoint_path, map_location='cpu')
+            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             if 'model_state_dict' in ckpt:
                 state_dict = ckpt['model_state_dict']
-                # 去除DataParallel的module.前缀
                 state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-                self.resampler.load_state_dict(state_dict)
-                print(f"[Pipeline] 加载checkpoint: {checkpoint_path} (step {ckpt.get('total_step', 'unknown')})")
+                
+                layer_indices = set()
+                for k in state_dict.keys():
+                    if k.startswith('layers.'):
+                        layer_idx = int(k.split('.')[1])
+                        layer_indices.add(layer_idx)
+                inferred_num_layers = max(layer_indices) + 1 if layer_indices else num_layers
+                inferred_num_learns = state_dict['learns'].shape[0] if 'learns' in state_dict else 3
+                print(f"[Pipeline] 推断模型结构: num_layers={inferred_num_layers}, num_learns={inferred_num_learns}")
+            else:
+                state_dict = None
+                inferred_num_layers = num_layers
+                inferred_num_learns = 3
+        else:
+            state_dict = None
+            inferred_num_layers = num_layers
+            inferred_num_learns = 3
+        
+        # 加载Resampler并强制Eval模式
+        self.resampler = load_perceiver_resampler(None, num_layers=inferred_num_layers)
+        if self.resampler.learns.shape[0] != inferred_num_learns:
+            self.resampler.learns = torch.nn.Parameter(
+                torch.randn(inferred_num_learns, 4096, device=self.device, dtype=torch.bfloat16)
+            )
+        
+        # 加载checkpoint权重
+        if state_dict is not None:
+            self.resampler.load_state_dict(state_dict)
+            print(f"[Pipeline] 加载checkpoint: {checkpoint_path} (step {ckpt.get('total_step', ckpt.get('step', 'unknown'))})")
         
         # 关键：全部设为eval模式
         self.vit.eval()
@@ -108,6 +132,7 @@ class CalliReaderPipeline:
         self.tok_embeddings = load_normed_tok_embeddings(location='cpu')
         self.tok_embeddings = self.tok_embeddings.to(self.device).to(torch.bfloat16)
         self.tok_embeddings.eval()
+        self.tokenizer = load_tokenizer()
         
         # 从数据集加载idx2char映射
         dataset = CaoshuDataset(data_root, 'Validation', transform=None)
@@ -115,7 +140,7 @@ class CalliReaderPipeline:
         self.num_classes = len(self.idx2char)
         print(f"[Pipeline] 字符类别数: {self.num_classes}")
 
-        # 4. 预计算所有字符的embedding（关键：eval模式+无梯度）
+        # 4. 预计算所有字符的embedding（关键：通过tokenizer获取正确token id）
         print("[Pipeline] 预计算字符embeddings...")
         self.all_char_embeds = self._compute_all_char_embeddings()
         self.all_char_embeds_norm = F.normalize(self.all_char_embeds, dim=-1)
@@ -126,17 +151,26 @@ class CalliReaderPipeline:
         print("[Pipeline] 初始化完成！\n")
 
     def _compute_all_char_embeddings(self, batch_size=1000):
-        """分批计算所有字符的embedding（确保eval模式）"""
+        """分批计算所有字符的embedding（通过tokenizer获取正确token id）"""
         self.tok_embeddings.eval()
         all_embeds = []
+        all_chars = [self.idx2char[i] for i in range(self.num_classes)]
         num_batches = (self.num_classes + batch_size - 1) // batch_size
 
         with torch.no_grad():
             for i in range(num_batches):
                 start_idx = i * batch_size
                 end_idx = min((i + 1) * batch_size, self.num_classes)
-                indices = torch.arange(start_idx, end_idx, device=self.device)
-                embeds = self.tok_embeddings(indices)
+                batch_chars = all_chars[start_idx:end_idx]
+                batch_tokens = self.tokenizer(
+                    batch_chars,
+                    return_tensors='pt',
+                    add_special_tokens=False,
+                    padding=True,
+                    truncation=True,
+                    max_length=4,
+                ).input_ids[:, 0].to(self.device)
+                embeds = self.tok_embeddings(batch_tokens)
                 all_embeds.append(embeds)
                 if i % 10 == 0:
                     print(f"  预计算进度: {end_idx}/{self.num_classes}")
@@ -146,7 +180,7 @@ class CalliReaderPipeline:
     def recognize_single_char(self, char_img: Image.Image, topk: int = 3) -> List[Dict]:
         """识别单个字符（修复版：正确的预处理流程）"""
         # 预处理（关键：transform内部已处理ToTensor和Normalize，不要重复/255）
-        char_img = char_img.convert('RGB').resize((224, 224)); img_tensor = self.transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
+        char_img = char_img.convert('RGB'); img_tensor = self.transform(char_img).unsqueeze(0).to(self.device).to(torch.bfloat16)
         
         # 确保模型在eval模式（双重保险）
         self.vit.eval()
@@ -218,8 +252,13 @@ class CalliReaderPipeline:
                      output_dir: str,
                      topk: int = 3,
                      save_crops: bool = True,
-                     debug: bool = False) -> Dict:
-        """处理整图：分割 → 识别 → 输出"""
+                     debug: bool = False,
+                     yolo_imgsz: int = 1344) -> Dict:
+        """处理整图：分割 → 识别 → 输出
+        
+        Args:
+            yolo_imgsz: YOLO 推理长边分辨率（默认1344，内部letterbox保长宽比）
+        """
 
         image_path = Path(image_path)
         output_dir = Path(output_dir)
@@ -227,11 +266,18 @@ class CalliReaderPipeline:
 
         print(f"[Pipeline] 处理图片: {image_path.name}")
 
-        # 1. YOLO分割
+        # 读取原图（存在内存中，用于后续从原图裁字）
+        orig_img_bgr = cv2.imread(str(image_path))
+        if orig_img_bgr is None:
+            raise ValueError(f"无法读取图像: {image_path}")
+        h, w = orig_img_bgr.shape[:2]
+        print(f"  [0/4] 原图分辨率: {w}×{h}")
+
+        # 1. YOLO分割（imgsz 限制长边，内部 letterbox，bbox 输出原图坐标）
         print("  [1/4] YOLO分割...")
         result_img_path = output_dir / f"{image_path.stem}_result.jpg"
         vis_img, boxes_data = self.visualizer.detect_and_visualize(
-            image_path, result_img_path
+            image_path, result_img_path, imgsz=yolo_imgsz
         )
         print(f"    检测到 {len(boxes_data)} 个字符")
         
@@ -243,10 +289,9 @@ class CalliReaderPipeline:
         print("  [2/4] 排序...")
         sorted_boxes = self.sort_boxes_reading_order(boxes_data)
 
-        # 3. 裁剪单字并识别
+        # 3. 裁剪单字并识别（从原图裁字，bbox 是原图坐标，精度无损）
         print("  [3/4] 识别字符...")
-        orig_img = cv2.imread(str(image_path))
-        orig_img_rgb = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
+        orig_img_rgb = cv2.cvtColor(orig_img_bgr, cv2.COLOR_BGR2RGB)
         chars_dir = output_dir / 'chars'
         if save_crops:
             chars_dir.mkdir(parents=True, exist_ok=True)
@@ -261,7 +306,7 @@ class CalliReaderPipeline:
 
             # 裁剪，加少量padding（关键：从RGB图裁剪，不是BGR）
             pad = 4
-            h_img, w_img = orig_img.shape[:2]
+            h_img, w_img = orig_img_rgb.shape[:2]
             x1c = max(0, x1 - pad)
             y1c = max(0, y1 - pad)
             x2c = min(w_img, x2 + pad)
@@ -341,6 +386,8 @@ def main():
     parser.add_argument("--topk", type=int, default=3, help="Top-K候选数")
     parser.add_argument("--num_layers", type=int, default=4, help="Resampler层数")
     parser.add_argument("--debug", action="store_true", help="调试模式（只处理前3个字）")
+    parser.add_argument("--yolo_imgsz", type=int, default=1344,
+                       help="YOLO 推理长边分辨率（默认1344，内部letterbox保长宽比）")
     
     args = parser.parse_args()
 
@@ -358,7 +405,8 @@ def main():
         image_path=args.image,
         output_dir=args.output,
         topk=args.topk,
-        debug=args.debug
+        debug=args.debug,
+        yolo_imgsz=args.yolo_imgsz
     )
 
     print("\n" + "="*60)
