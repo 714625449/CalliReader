@@ -429,4 +429,4 @@ model.language_model = PeftModel.from_pretrained(
 *更新时间：2026-05-12*  
 *训练状态：Resampler 恢复训练中（step 50,000+/100,000）*  
 *当前最佳：Top-1 47.79%，Top-5 69.81%，Best Loss 0.1751*  
-*磁盘状态：/root/sj-tmp 可用 49.6GB*
+*磁盘状态：/root/sj-tmp 可用 57GB（已删除 CCC 原始数据集释放 6.8GB）*
