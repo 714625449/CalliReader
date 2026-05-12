@@ -72,10 +72,11 @@ loss = (1 - cosine_sim).mean()
 
 ```
 /root/sj-tmp/checkpoints/CaoshuReader_v2/        (当前主力)
-├── caoshu_best.pt        (3.2GB)  最佳模型 (step 49761, loss 0.1751)
-├── caoshu_step40000.pt   (3.2GB)
-├── caoshu_step45000.pt   (3.2GB)
-└── caoshu_step50000.pt   (3.2GB)  当前最新
+├── caoshu_best.pt        (3.2GB)  **最佳模型** (step 91877, loss 0.1400)
+├── caoshu_step90000.pt   (3.2GB)
+├── caoshu_step95000.pt   (3.2GB)
+├── caoshu_step100000.pt  (3.2GB)  step 100000
+└── caoshu_final.pt       (3.2GB)  最终模型 (step 100000)
 
 /root/sj-tmp/checkpoints/CaoshuReader_lr5e5/     (历史实验)
 └── caoshu_best.pt        (3.2GB)  step 20605, loss 0.590
@@ -164,7 +165,7 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ---
 
-### 3.5 Resampler 大数据集恢复训练（🔄 当前主力）
+### 3.5 Resampler 大数据集恢复训练（✅ 已完成）
 
 #### 3.5.1 数据集合并
 
@@ -260,8 +261,8 @@ e-IT 训练：图片 → callialign.pth(Resampler) → [UNUSED_TOKEN_140] → Lo
 
 ```
 ┌──────────────────────────────────────────┐
-│  主攻：Resampler 大数据量训练             │
-│  当前：47.79% → 目标 50%+                │
+│  ✅ 已完成：Resampler 大数据量训练       │
+│  最终：53.83% Top-1，74.91% Top-5         │
 │  辅助：e-IT LoRA 后处理纠错（非优先）     │
 │  不搞：端到端 InternVL + LoRA（已证伪）   │
 └──────────────────────────────────────────┘
@@ -454,7 +455,9 @@ model.language_model = PeftModel.from_pretrained(
 ---
 
 *更新时间：2026-05-12*  
-*训练状态：Resampler 恢复训练中（step 94,000/100,000）*  
-*当前最佳：Top-1 53.19%，Top-5 74.42%，Best Loss 0.1400*  
-*磁盘状态：/root/sj-tmp 可用 57GB（已删除 CCC 原始数据集释放 6.8GB）*  
+*训练状态：✅ Resampler 训练已完成（step 100,000/100,000）*  
+*最终验证：Top-1 53.83%，Top-5 74.91%*  
+*最佳模型：caoshu_best.pt @ step 91877, loss 0.1400*  
+*模型已保存：/caoshu/params/callialign_v2.pth*  
+*磁盘状态：/root/sj-tmp 可用 56.3GB*  
 *架构图：/caoshu/caoshu.jpg*
