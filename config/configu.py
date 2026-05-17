@@ -4,13 +4,13 @@ import os
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-VIT_MODEL_PATH = './params/vit_model.pt'
-MLP1_PATH = './params/params/mlp1.pth'
-TOK_EMBEDDING_PATH = './params/token_embedding.pth'
-TOKENIZER_PATH = 'InternVL'
-NORM_PARAMS_PATH='./params/gauss_norm_mu_sigma.pth'
-NORM_TOK_EMBEDDING_PATH='./params/gauss_norm.pth'
-NEW_1000_TOK_EMBEDDING_PATH='./params/new1000_token_embedding.pth'
+VIT_MODEL_PATH = '/caoshu/params/vit_model.pt'
+MLP1_PATH = '/caoshu/params/mlp1.pth'
+TOK_EMBEDDING_PATH = '/caoshu/params/token_embedding.pth'
+TOKENIZER_PATH = '/caoshu/InternVL'
+NORM_PARAMS_PATH='/caoshu/params/gauss_norm_mu_sigma.pth'
+NORM_TOK_EMBEDDING_PATH='/caoshu/params/gauss_norm.pth'
+NEW_1000_TOK_EMBEDDING_PATH='/caoshu/params/new1000_token_embedding.pth'
 INTERNVL_PATH='InternVL'
 
 
@@ -56,7 +56,7 @@ WORLD_SIZE = torch.cuda.device_count()
 # LOAD CHECKPOINT AND RESUME TRAINING
 # PERCEIVER_CHECKPOINT ="/home/luoyx/InternVL/CalliReader/params/perceiver_4_n01_1e-4_new.pth"
 # RESUME = 26500
-PERCEIVER_CHECKPOINT ='./params/callialign.pth'
+PERCEIVER_CHECKPOINT ='/caoshu/params/callialign.pth'
 RESUME = 50000
-ORDERFORMER_CHECKPOINT='./params/orderformer.pth'
-YOLO_CHECKPOINT="./params/best.pt"
+ORDERFORMER_CHECKPOINT='/caoshu/params/orderformer.pth'
+YOLO_CHECKPOINT="/caoshu/params/best.pt"

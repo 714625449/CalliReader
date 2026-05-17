@@ -19,17 +19,19 @@ def strip_suffix(dirname: str) -> str:
 
 
 class CaoshuDataset(Dataset):
-    def __init__(self, root: str, split: str = 'Validation', transform=None):
+    def __init__(self, root: str, split: str = 'val', transform=None, repeat_train: int = 3):
         """
-        root   : Cursive_Chinese_Calligraphy_Dataset 目錄路徑
-        split  : 'Training' | 'Validation' | 'Test'
+        root   : 數據集根目錄，子目錄為 train/val/test
+        split  : 'train' | 'val' | 'test'
+        repeat_train : train 集重複採樣倍數（在線增強用）
         """
         self.root = Path(root) / split
         self.transform = transform
+        self.split = split
 
-        # 建立 字→index 映射
+        # 建立 字→index 映射（新結構：{字}/，無數字後綴）
         all_chars = sorted(set(
-            strip_suffix(d.name)
+            d.name
             for d in self.root.iterdir()
             if d.is_dir()
         ))
@@ -42,10 +44,16 @@ class CaoshuDataset(Dataset):
         for char_dir in sorted(self.root.iterdir()):
             if not char_dir.is_dir():
                 continue
-            char = strip_suffix(char_dir.name)
+            char = char_dir.name
+            if char not in self.char2idx:
+                continue
             label = self.char2idx[char]
             for img_path in sorted(char_dir.glob('*.jpg')):
                 self.samples.append((img_path, label))
+
+        # train 集 ×3 重複採樣（每個 epoch 同張圖不同增強）
+        if split == 'train' and repeat_train > 1:
+            self.samples = self.samples * repeat_train
 
         print(f"[CaoshuDataset] split={split}, "
               f"classes={self.num_classes}, samples={len(self.samples)}")
@@ -62,23 +70,23 @@ class CaoshuDataset(Dataset):
 
 
 def get_transform(split: str):
-    """訓練時做基本 augmentation，驗證/測試只做 normalize"""
+    """訓練時在線增強（每個 epoch 隨機），驗證/測試只做 normalize"""
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
         std=[0.229, 0.224, 0.225]
     )
-    if split == 'Training':
+    if split == 'train':
         return transforms.Compose([
-            transforms.Resize((448, 448)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            # 圖片已 resize 到 448，這裡不再 resize
+            transforms.RandomRotation(degrees=(-8, 8)),
+            transforms.RandomPerspective(distortion_scale=0.15, p=0.5),
+            transforms.ColorJitter(brightness=0.15, contrast=0.15),
+            transforms.ElasticTransform(alpha=30.0, sigma=4.0),
             transforms.ToTensor(),
             normalize,
         ])
     else:
         return transforms.Compose([
-            transforms.Resize((448, 448)),
             transforms.ToTensor(),
             normalize,
         ])
@@ -86,14 +94,19 @@ def get_transform(split: str):
 
 def get_dataloader(
     root: str,
-    split: str = 'Validation',
+    split: str = 'val',
     batch_size: int = 32,
     num_workers: int = 4,
     shuffle: bool = None,
+    repeat_train: int = 3,
 ) -> DataLoader:
     if shuffle is None:
-        shuffle = (split == 'Training')
-    dataset = CaoshuDataset(root, split, transform=get_transform(split))
+        shuffle = (split == 'train')
+    dataset = CaoshuDataset(
+        root, split,
+        transform=get_transform(split),
+        repeat_train=repeat_train if split == 'train' else 1
+    )
     return DataLoader(
         dataset,
         batch_size=batch_size,

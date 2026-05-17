@@ -34,3 +34,4 @@ InternVL_backup/
 # 环境
 .env
 *.log
+train/

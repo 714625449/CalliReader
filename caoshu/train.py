@@ -59,6 +59,36 @@ def alignment_loss(pred, target_embed):
     return (1 - cosine_sim).mean()
 
 
+def contrastive_alignment_loss(pred, target_embed, labels, margin=0.1, neg_weight=0.5):
+    """
+    pred: [B, Q, D] - resampler 输出
+    target_embed: [B, D] - 正样本文本 embedding
+    labels: [B] - 字符标签索引
+    """
+    # 1. 原 alignment loss（拉近正样本）
+    tgt = F.normalize(target_embed, dim=-1).unsqueeze(1)
+    pred_norm = F.normalize(pred, dim=-1)
+    cosine_sim = (pred_norm * tgt).sum(dim=-1)
+    pos_loss = (1 - cosine_sim).mean()
+
+    # 2. Contrastive push-apart（推开 batch 内负样本）
+    pred_vec = F.normalize(pred.mean(dim=1), dim=-1)    # [B, D]
+    target_norm = F.normalize(target_embed, dim=-1)      # [B, D]
+
+    # batch 内负样本 mask（同 label 不算负样本）
+    neg_mask = (labels.unsqueeze(0) != labels.unsqueeze(1)).float()  # [B, B]
+
+    # 视觉特征 vs 文本 embedding 的相似度矩阵
+    sim_matrix = torch.matmul(pred_vec, target_norm.t())  # [B, B]
+
+    # hard negative: 只惩罚相似度 > margin 的负样本对
+    neg_loss = F.relu(sim_matrix - margin) * neg_mask
+    neg_loss = neg_loss.sum() / (neg_mask.sum() + 1e-8)
+
+    total_loss = pos_loss + neg_weight * neg_loss
+    return total_loss
+
+
 @torch.no_grad()
 def evaluate_topk(resampler, vit, mlp1, tok_embeddings, val_loader,
                   all_char_embeds, device, topk=5):
@@ -151,16 +181,16 @@ def check_disk_space(save_dir, keep_ckpts, ckpt_size_gb=3.2):
 def get_args():
     p = argparse.ArgumentParser(description='CaoshuReader Training - 120GB Disk Optimized')
     p.add_argument('--data_root', type=str,
-        default='/root/sj-tmp/datasets/CursiveChineseCalligraphyDataset/Cursive_Chinese_Calligraphy_Dataset')
-    p.add_argument('--split', type=str, default='Training')
-    p.add_argument('--save_dir', type=str, default='/root/sj-tmp/checkpoints/CaoshuReader')
+        default='/root/sj-tmp/datasets/HQ')
+    p.add_argument('--split', type=str, default='train')
+    p.add_argument('--save_dir', type=str, default='/root/sj-tmp/checkpoints/CaoshuReader_HQ')
     p.add_argument('--batch_size', type=int, default=16)
     p.add_argument('--grad_accum', type=int, default=16)
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--total_steps', type=int, default=100000)  # 增加到支持继续训练
     p.add_argument('--log_every', type=int, default=100)
     p.add_argument('--save_every', type=int, default=1000)
-    p.add_argument('--keep_ckpts', type=int, default=20, help='保留最近N个step checkpoint（建议20，约60GB）')
+    p.add_argument('--keep_ckpts', type=int, default=15, help='保留最近N个step checkpoint（默认15，约48GB）')
     p.add_argument('--resume', type=str, default=None)
     p.add_argument('--num_layers', type=int, default=4)
     p.add_argument('--skip_disk_check', action='store_true', help='跳过磁盘空间检查')
@@ -243,7 +273,7 @@ def main():
     best_step = 0
     
     # 加载 Validation 数据集和预计算字符 embedding（用于评估）
-    val_dataset = CaoshuDataset(args.data_root, 'Validation', transform=get_transform('Validation'))
+    val_dataset = CaoshuDataset(args.data_root, 'val', transform=get_transform('val'))
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                             shuffle=False, num_workers=4, pin_memory=True)
     all_chars = [val_dataset.idx2char[i] for i in range(len(val_dataset.idx2char))]
@@ -296,6 +326,7 @@ def main():
                 break
 
             imgs = imgs.to(device)
+            labels = labels.to(device)
 
             if not measured:
                 torch.cuda.empty_cache()
@@ -324,7 +355,7 @@ def main():
                 with torch.no_grad():
                     tgt_embed = tok_embeddings(token_ids)
 
-                loss = alignment_loss(pred, tgt_embed)
+                loss = contrastive_alignment_loss(pred, tgt_embed, labels)
             # =========================================================
 
             loss_item = loss.item()
