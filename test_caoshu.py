@@ -11,7 +11,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 
 # 添加项目路径
-PROJECT_ROOT = '/workspace/CalliReader'
+PROJECT_ROOT = '/caoshu'
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'caoshu'))
 
@@ -61,16 +61,39 @@ def evaluate(ckpt_path, data_root, split='Validation', num_test=None, batch_size
     for p in mlp1.parameters():
         p.requires_grad = False
     
-    resampler = load_perceiver_resampler(path=None, num_layers=4)
+    # 从 checkpoint 推断模型结构（兼容不同 num_layers / num_learns）
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    state_dict = ckpt['model_state_dict']
+    # 移除 DataParallel/DistributedDataParallel 的 module. 前缀
+    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    
+    # 推断 num_layers
+    layer_indices = set()
+    for k in state_dict.keys():
+        if k.startswith('layers.'):
+            layer_idx = int(k.split('.')[1])
+            layer_indices.add(layer_idx)
+    num_layers = max(layer_indices) + 1 if layer_indices else 4
+    
+    # 推断 num_learns
+    num_learns = state_dict['learns'].shape[0] if 'learns' in state_dict else 3
+    print(f"Inferred model config: num_layers={num_layers}, num_learns={num_learns}")
+    
+    resampler = load_perceiver_resampler(path=None, num_layers=num_layers)
+    # 如果 num_learns 不匹配，需要覆盖
+    if resampler.learns.shape[0] != num_learns:
+        resampler.learns = torch.nn.Parameter(
+            torch.randn(num_learns, 4096, device=device, dtype=torch.bfloat16)
+        )
     resampler = resampler.to(device).to(torch.bfloat16)
     
     # 加载 checkpoint
-    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-    resampler.load_state_dict(ckpt['model_state_dict'])
+    resampler.load_state_dict(state_dict)
     resampler.eval()
-    step = ckpt.get('step', '?')
-    loss = ckpt.get('loss', '?')
-    print(f"Loaded checkpoint: step {step}, training loss {loss:.4f}")
+    step = ckpt.get('step', ckpt.get('total_step', '?'))
+    loss = ckpt.get('loss', ckpt.get('best_loss', '?'))
+    loss_str = f"{loss:.4f}" if isinstance(loss, (int, float)) else str(loss)
+    print(f"Loaded checkpoint: step {step}, training loss {loss_str}")
     
     # 加载其他组件
     tok_embeddings, _ = load_normed_tok_embeddings(load_checkboard=True, location='cpu')
@@ -105,7 +128,7 @@ def evaluate(ckpt_path, data_root, split='Validation', num_test=None, batch_size
             batch_embeds = tok_embeddings(batch_tokens)
         all_embeds.append(batch_embeds)
     all_embeds = torch.cat(all_embeds, dim=0)  # (vocab_size, embed_dim)
-    all_embeds_norm = torch.nn.functional.normalize(all_embeds, dim=-1)
+    all_embeds_norm = torch.nn.functional.normalize(all_embeds, dim=-1).float()  # 转 fp32，与 pred 对齐 dtype
     
     # 评估
     correct = 0
@@ -114,11 +137,16 @@ def evaluate(ckpt_path, data_root, split='Validation', num_test=None, batch_size
     
     print("Evaluating...")
     for imgs, labels in tqdm(loader):
-        imgs = imgs.to(device).to(torch.bfloat16)
+        imgs = imgs.to(device)
         
-        # 前向传播
-        vit_feats = get_visual_embed(imgs, vit, mlp1)
-        pred = resampler(vit_feats)  # 可能是 (B, N, D) 或 (B, D)
+        # 前向传播（no_grad + autocast 节省显存）
+        with torch.no_grad():
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                vit_feats = get_visual_embed(imgs, vit, mlp1)
+                pred = resampler(vit_feats)  # 可能是 (B, N, D) 或 (B, D)
+        
+        # autocast 退出后显式转 fp32，避免与 fp32 embedding 做 mm 炸 dtype
+        pred = pred.float()
         
         # ==================== 关键修复 ====================
         # PerceiverResampler 输出 (B, num_queries, D)，需要压平到 (B, D)
@@ -154,7 +182,8 @@ def evaluate(ckpt_path, data_root, split='Validation', num_test=None, batch_size
     
     print(f"\n{'='*60}")
     print(f"Validation Accuracy: {correct}/{total} = {acc:.2f}%")
-    print(f"Checkpoint: step {step}, training loss {loss:.4f}")
+    loss_str = f"{loss:.4f}" if isinstance(loss, (int, float)) else str(loss)
+    print(f"Checkpoint: step {step}, training loss {loss_str}")
     print(f"{'='*60}")
     
     if errors:

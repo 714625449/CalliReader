@@ -14,6 +14,6 @@ python caoshu/train.py \
     --lr=5e-5 \
     --save_every=5000 \
     --keep_ckpts=3 \
-    --resume=/caoshu/params/callialign.pth \
+    --resume=/root/sj-tmp/checkpoints/CaoshuReader_v2/caoshu_step75000.pt \
     --num_layers=4 \
     --skip_disk_check

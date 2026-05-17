@@ -40,7 +40,7 @@ def test_with_caoshu():
     caoshu_ckpt = '/root/sj-tmp/checkpoints/CaoshuReader/caoshu_best.pt'
     print(f"加载草书权重: {caoshu_ckpt}")
     
-    ckpt = torch.load(caoshu_ckpt, map_location='cpu')
+    ckpt = torch.load(caoshu_ckpt, map_location='cpu', weights_only=False)
     state_dict = ckpt['model_state_dict']
     
     # 找到并替换 resampler

@@ -78,9 +78,10 @@ triton==3.0.0
 typing_extensions 
 tzdata 
 ultralytics
+flash-attn==2.8.3
 unicodedata2
 urllib3
 xxhash 
 yarl==1.11.0
 zipp==3.17.0
-#/home/luoyx/InternVL/InternVL-main/flash_attn-2.6.1+cu118torch2.4cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
+

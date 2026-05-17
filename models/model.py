@@ -55,7 +55,7 @@ def load_normed_tok_embeddings(vocab_size=92553, llm_hidden_size=4096,load_check
     tok_embeddings.load_state_dict(torch.load(NORM_TOK_EMBEDDING_PATH, weights_only=True, map_location=location))
     print("norm tok_embedding已加载")
     if load_checkboard:
-        checkboard_norm=torch.load(NORM_PARAMS_PATH) # (voc_size, 2) mu sigma    pred * sigma + mu (逐行)
+        checkboard_norm=torch.load(NORM_PARAMS_PATH, weights_only=True) # (voc_size, 2) mu sigma    pred * sigma + mu (逐行)
         print("归一化参数(mu, sigma)已加载")
         return tok_embeddings,checkboard_norm
     return tok_embeddings
@@ -69,7 +69,7 @@ def load_tokenizer():
 def load_perceiver_resampler(path=None, num_layers=4, checkpoint=None):
     model = PerceiverResampler(dim=4096, depth = num_layers).to(device).to(torch.bfloat16)
     if checkpoint == None and path!=None:
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, weights_only=False)
     if path is not None:
         print(f"Load from {path}")
         if isinstance(checkpoint, dict):
@@ -85,7 +85,7 @@ def load_perceiver_resampler(path=None, num_layers=4, checkpoint=None):
 def load_mlp(path=None):
     model = MLP(dim=256).to(device).to(torch.bfloat16)
     if path is not None:
-        model.load_state_dict(torch.load(path))
+        model.load_state_dict(torch.load(path, weights_only=False))
     print(f"Model has a parameter scale of {sum(p.numel() for p in model.parameters())/1e9:.3f} B.")
     return model
 
@@ -97,10 +97,9 @@ def load_perceiver_resampler_2(model_path, num_layers=4,device=None):
     model = PerceiverResampler(dim=4096,depth=num_layers)
     
     # 加载预训练权重
-    state_dict = torch.load(model_path, map_location='cpu')
+    state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
     
     # 移除 state_dict 中的 `module.` 前缀
-    state_dict = torch.load(model_path,weights_only=False)
     if 'model_state_dict' in state_dict.keys():
         state_dict = state_dict['model_state_dict']
 
@@ -126,7 +125,7 @@ def load_perceiver_resampler_2(model_path, num_layers=4,device=None):
 
 def load_pretrained_resampler(checkpoint_path, num_layers=6):
     model = load_perceiver_resampler(num_layers=num_layers)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     #print(checkpoint.keys())
     # 如果模型是通过 DDP 保存的，需要处理 'module.' 前缀
     if 'module.' in list(checkpoint.keys())[0]:
@@ -147,7 +146,7 @@ def load_optimizer(optimizer, path, resume):
     
     if resume:
         #assert isinstance(ckpt, dict) and 'optimizer_state_dict' in ckpt
-        ckpt = torch.load(path)
+        ckpt = torch.load(path, weights_only=False)
         if 'optimizer_state_dict' not in ckpt:
             return optimizer
         # 处理 DDP 模型的情况
@@ -170,7 +169,7 @@ def load_scheduler(scheduler, path, resume):
     if resume:
         #assert isinstance(ckpt, dict) and 'scheduler_state_dict' in ckpt
         # 加载checkpoint
-        ckpt = torch.load(path)
+        ckpt = torch.load(path, weights_only=False)
         if 'scheduler_state_dict' not in ckpt:
             return scheduler
         # 处理 DDP 模型的情况
@@ -230,7 +229,7 @@ class OrderFormer:
     def __init__(self, model_path=None,max_nums=300,input_dim=4, model_dim=256, num_heads=8, num_layers=4, output_dim=1,device=torch.device("cuda"),label_name="turn",norm=False):
         self.model = Transformer(input_dim, model_dim, num_heads, num_layers, output_dim,norms=norm).to_empty(device=device)
         if isinstance(model_path,str):
-            self.model.load_state_dict(torch.load(model_path))
+            self.model.load_state_dict(torch.load(model_path, weights_only=False))
 
         self.device=device
         self.max_nums=max_nums

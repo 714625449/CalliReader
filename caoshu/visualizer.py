@@ -13,55 +13,58 @@ class YoloVisualizer:
         self.conf_thres = conf_thres
         print(f"[Visualizer] 加载 YOLO 模型: {model_path}")
     
-    def detect_and_visualize(self, 
-                           image_path: Union[str, Path], 
+    def detect_and_visualize(self,
+                           image_path: Union[str, Path],
                            output_path: Union[str, Path] = None,
                            box_color: Tuple[int, int, int] = (0, 0, 255),  # 红色
-                           thickness: int = 3) -> Tuple[np.ndarray, List[Dict]]:
+                           thickness: int = 3,
+                           imgsz: int = 1344) -> Tuple[np.ndarray, List[Dict]]:
         """
         检测并在原图上画框（无标签、无统计、纯净框）
+        Args:
+            imgsz: YOLO 推理分辨率长边限制，内部自动 letterbox（防止OOM + 保长宽比）
         """
         image_path = Path(image_path)
-        
+
         # 读取原图
         img = cv2.imread(str(image_path))
         if img is None:
             raise ValueError(f"无法读取图像: {image_path}")
-        
-        # 执行检测
-        results = self.model(img, conf=self.conf_thres, verbose=False)
-        
+
+        # 执行检测（imgsz 限制长边，内部 letterbox，bbox 自动映射回原图坐标）
+        results = self.model(img, imgsz=imgsz, conf=self.conf_thres, verbose=False)
+
         # 绘制结果 - 只画框，无任何文字
         vis_img = img.copy()
         boxes_data = []
-        
+
         for idx, box in enumerate(results[0].boxes):
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
             conf = float(box.conf[0])
-            
+
             # 只画红色框，不添加任何文字标签
             cv2.rectangle(vis_img, (x1, y1), (x2, y2), box_color, thickness)
-            
+
             boxes_data.append({
                 "id": idx + 1,
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
                 "confidence": round(conf, 3),
                 "center": [int((x1+x2)/2), int((y1+y2)/2)]
             })
-        
+
         # 保存结果（无任何文字 overlay）
         if output_path:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(output_path), vis_img)
             print(f"[Visualizer] 结果已保存: {output_path}")
-            
+
             # 同时保存 JSON 坐标
             json_path = output_path.with_suffix('.json')
             with open(json_path, 'w', encoding='utf-8') as f:
                 json.dump(boxes_data, f, ensure_ascii=False, indent=2)
             print(f"[Visualizer] 坐标已保存: {json_path}")
-        
+
         return vis_img, boxes_data
     
     def visualize_folder(self, 

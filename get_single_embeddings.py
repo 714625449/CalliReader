@@ -242,7 +242,7 @@ def extract_single_embedding(jspath, jpgpath, out_path_pt):
     _ = load_tok_embeddings().to(DEVICE)
 
     # 2) Load normalization parameters
-    mu_sigma = torch.load("./params/gauss_norm_mu_sigma.pth")
+    mu_sigma = torch.load("./params/gauss_norm_mu_sigma.pth", weights_only=True)
     mu = mu_sigma['weight'][:, 0].reshape((-1, 1)).to(DEVICE)
     sigma = mu_sigma['weight'][:, 1].reshape((-1, 1)).to(DEVICE)
 
